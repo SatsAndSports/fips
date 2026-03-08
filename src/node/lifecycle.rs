@@ -448,10 +448,13 @@ impl Node {
                     let dns_channel_size = self.config.node.buffers.dns_channel;
                     let (identity_tx, identity_rx) = tokio::sync::mpsc::channel(dns_channel_size);
                     let dns_ttl = self.config.dns.ttl();
-                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(socket, identity_tx, dns_ttl));
+                    let base_hosts = crate::upper::hosts::HostMap::from_peer_configs(self.config.peers());
+                    let hosts_path = std::path::PathBuf::from(crate::upper::hosts::DEFAULT_HOSTS_PATH);
+                    let reloader = crate::upper::hosts::HostMapReloader::new(base_hosts, hosts_path);
+                    info!(bind = %bind, hosts = reloader.hosts().len(), "DNS responder started for .fips domain (auto-reload enabled)");
+                    let handle = tokio::spawn(crate::upper::dns::run_dns_responder(socket, identity_tx, dns_ttl, reloader));
                     self.dns_identity_rx = Some(identity_rx);
                     self.dns_task = Some(handle);
-                    info!(bind = %bind, "DNS responder started for .fips domain");
                 }
                 Err(e) => {
                     warn!(bind = %bind, error = %e, "Failed to start DNS responder");

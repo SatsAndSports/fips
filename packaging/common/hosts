@@ -1,0 +1,22 @@
+# FIPS Hosts File
+#
+# Static hostname-to-npub mappings for .fips DNS resolution.
+# Each entry allows resolving hostname.fips to the peer's IPv6 address.
+#
+# Format: hostname npub1...
+#
+# Rules:
+#   - Lines starting with # are comments
+#   - Empty lines are ignored
+#   - Hostnames: a-z, 0-9, hyphens only; max 63 characters
+#   - One hostname and one npub per line, separated by whitespace
+#   - Duplicate hostnames: last entry wins
+#
+# Peer aliases from fips.yaml are also resolved automatically.
+# Entries here take precedence over peer aliases on conflict.
+#
+# Examples:
+#   vps-tx    npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u
+#   vps-chi   npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98
+#
+# Changes are picked up automatically on the next DNS query.

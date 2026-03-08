@@ -10,6 +10,7 @@
 #   /usr/local/bin/fipsctl        CLI query tool
 #   /usr/local/bin/fipstop        TUI monitor
 #   /etc/fips/fips.yaml           Configuration (preserved if exists)
+#   /etc/fips/hosts               Host-to-npub mappings (preserved if exists)
 #   /etc/systemd/system/fips.service      systemd unit
 #   /etc/systemd/system/fips-dns.service  DNS routing for .fips domain
 
@@ -71,6 +72,14 @@ if [ -f "${CONFIG_FILE}" ]; then
 else
     install -m 0600 "${SCRIPT_DIR}/fips.yaml" "${CONFIG_FILE}"
     echo "Configuration installed to ${CONFIG_FILE}"
+fi
+
+HOSTS_FILE="${CONFIG_DIR}/hosts"
+if [ -f "${HOSTS_FILE}" ]; then
+    echo "Hosts file exists at ${HOSTS_FILE}, not overwriting."
+else
+    install -m 0644 "${SCRIPT_DIR}/hosts" "${HOSTS_FILE}"
+    echo "Hosts file installed to ${HOSTS_FILE}"
 fi
 
 # --- Install systemd unit ---

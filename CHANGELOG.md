@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ECN congestion signaling and transport congestion detection
 - Persistent identity with key file management (`fipsctl keygen`)
 - Periodic Noise rekey with fresh DH for forward secrecy (FMP + FSP)
+- Host-to-npub static mapping: resolve `hostname.fips` via host map
+  populated from peer config aliases and `/etc/fips/hosts` file
+- DNS responder auto-reloads hosts file on modification (no restart needed)
 - Systemd service packaging with tarball installer
 - Build version metadata: git commit hash, dirty flag, and target triple
   embedded in all binaries via `--version`

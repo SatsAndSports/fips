@@ -33,6 +33,7 @@ use crate::transport::tcp::TcpTransport;
 #[cfg(target_os = "linux")]
 use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
+use crate::upper::hosts::HostMap;
 use crate::upper::icmp_rate_limit::IcmpRateLimiter;
 use crate::upper::tun::{TunError, TunOutboundRx, TunState, TunTx};
 use self::wire::{build_encrypted, build_established_header, prepend_inner_header, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP};
@@ -40,6 +41,7 @@ use crate::{Config, ConfigError, Identity, IdentityError, NodeAddr, PeerIdentity
 use rand::Rng;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use thiserror::Error;
 
@@ -380,6 +382,11 @@ pub struct Node {
     /// Human-readable names for configured peers (alias or short npub).
     /// Populated at startup from peer config.
     peer_aliases: HashMap<NodeAddr, String>,
+
+    // === Host Map ===
+    /// Static hostname → npub mapping for DNS resolution.
+    /// Built at construction from peer aliases and /etc/fips/hosts.
+    host_map: Arc<HostMap>,
 }
 
 impl Node {
@@ -433,6 +440,13 @@ impl Node {
         let max_links = config.node.limits.max_links;
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
 
+        let mut host_map = HostMap::from_peer_configs(config.peers());
+        let hosts_file = HostMap::load_hosts_file(std::path::Path::new(
+            crate::upper::hosts::DEFAULT_HOSTS_PATH,
+        ));
+        host_map.merge(hosts_file);
+        let host_map = Arc::new(host_map);
+
         Ok(Self {
             identity,
             startup_epoch,
@@ -483,6 +497,7 @@ impl Node {
             last_parent_reeval: None,
             last_congestion_log: None,
             peer_aliases: HashMap::new(),
+            host_map,
         })
     }
 
@@ -529,6 +544,8 @@ impl Node {
         let max_peers = config.node.limits.max_peers;
         let max_links = config.node.limits.max_links;
         let coords_response_interval_ms = config.node.session.coords_response_interval_ms;
+
+        let host_map = Arc::new(HostMap::new());
 
         Self {
             identity,
@@ -580,6 +597,7 @@ impl Node {
             last_parent_reeval: None,
             last_congestion_log: None,
             peer_aliases: HashMap::new(),
+            host_map,
         }
     }
 
@@ -730,11 +748,15 @@ impl Node {
     /// Return a human-readable display name for a NodeAddr.
     ///
     /// Lookup order:
-    /// 1. Configured peer alias or short npub (from startup map)
-    /// 2. Active peer's short npub (e.g., inbound peer not in config)
-    /// 3. Session endpoint's short npub (end-to-end, may not be direct peer)
-    /// 4. Truncated NodeAddr hex (unknown address)
+    /// 1. Host map hostname (from peer aliases + /etc/fips/hosts)
+    /// 2. Configured peer alias or short npub (from startup map)
+    /// 3. Active peer's short npub (e.g., inbound peer not in config)
+    /// 4. Session endpoint's short npub (end-to-end, may not be direct peer)
+    /// 5. Truncated NodeAddr hex (unknown address)
     pub(crate) fn peer_display_name(&self, addr: &NodeAddr) -> String {
+        if let Some(hostname) = self.host_map.lookup_hostname(addr) {
+            return hostname.to_string();
+        }
         if let Some(name) = self.peer_aliases.get(addr) {
             return name.clone();
         }

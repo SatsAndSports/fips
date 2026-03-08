@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod dns;
+pub mod hosts;
 pub mod icmp;
 pub mod icmp_rate_limit;
 pub mod tcp_mss;
