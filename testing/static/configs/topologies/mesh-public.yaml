@@ -37,8 +37,7 @@ nodes:
 
   # External/public node (not a Docker container)
   pub:
-    nsec: "f102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff0"
-    npub: "npub13fhtmrk6f556acrjfkwrt37ppyhr5wcy89nhkcav9vcy27z5uygsd27sc3"
+    npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
     external_ip: "217.77.8.91"
     peers: [a, b, c]
 
