@@ -130,6 +130,11 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
     let links = helpers::u64_field(data, "link_count");
     let transports = helpers::u64_field(data, "transport_count");
     let connections = helpers::u64_field(data, "connection_count");
+    let mesh_size = data
+        .get("estimated_mesh_size")
+        .and_then(|v| v.as_u64())
+        .map(|n| format!("~{n}"))
+        .unwrap_or_else(|| "-".into());
 
     let lines = vec![
         Line::from(vec![
@@ -153,6 +158,8 @@ fn draw_state(frame: &mut Frame, data: &serde_json::Value, area: Rect) {
             Span::styled(transports, count),
             Span::styled("  connections: ", label),
             Span::styled(connections, count),
+            Span::styled("  mesh: ", label),
+            Span::styled(mesh_size, count),
         ]),
     ];
 

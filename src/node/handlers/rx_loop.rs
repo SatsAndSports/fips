@@ -114,6 +114,7 @@ impl Node {
                     self.process_pending_retries(now_ms).await;
                     self.check_tree_state().await;
                     self.check_bloom_state().await;
+                    self.compute_mesh_size();
                     self.check_mmp_reports().await;
                     self.check_session_mmp_reports().await;
                     self.check_link_heartbeats().await;

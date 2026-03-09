@@ -378,6 +378,12 @@ pub struct Node {
     /// Timestamp of last congestion detection log (rate-limited to 5s).
     last_congestion_log: Option<std::time::Instant>,
 
+    // === Mesh Size Estimate ===
+    /// Cached estimated mesh size (computed once per tick from bloom filters).
+    estimated_mesh_size: Option<u64>,
+    /// Timestamp of last mesh size log emission.
+    last_mesh_size_log: Option<std::time::Instant>,
+
     // === Display Names ===
     /// Human-readable names for configured peers (alias or short npub).
     /// Populated at startup from peer config.
@@ -496,6 +502,8 @@ impl Node {
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
+            estimated_mesh_size: None,
+            last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
             host_map,
         })
@@ -596,6 +604,8 @@ impl Node {
             retry_pending: HashMap::new(),
             last_parent_reeval: None,
             last_congestion_log: None,
+            estimated_mesh_size: None,
+            last_mesh_size_log: None,
             peer_aliases: HashMap::new(),
             host_map,
         }
@@ -850,6 +860,76 @@ impl Node {
     /// Get mutable Bloom filter state.
     pub fn bloom_state_mut(&mut self) -> &mut BloomState {
         &mut self.bloom_state
+    }
+
+    // === Mesh Size Estimate ===
+
+    /// Get the cached estimated mesh size.
+    pub fn estimated_mesh_size(&self) -> Option<u64> {
+        self.estimated_mesh_size
+    }
+
+    /// Compute and cache the estimated mesh size from bloom filters.
+    ///
+    /// Uses the spanning tree partition: parent's filter covers nodes reachable
+    /// upward, children's filters cover disjoint subtrees downward. The sum
+    /// of estimated entry counts plus one (self) approximates total network size.
+    pub(crate) fn compute_mesh_size(&mut self) {
+        let my_addr = *self.tree_state.my_node_addr();
+        let parent_id = *self.tree_state.my_declaration().parent_id();
+        let is_root = self.tree_state.is_root();
+
+        let mut total: f64 = 1.0; // count self
+        let mut child_count: u32 = 0;
+        let mut has_data = false;
+
+        // Parent's filter: nodes reachable upward through the tree
+        if !is_root
+            && let Some(parent) = self.peers.get(&parent_id)
+            && let Some(filter) = parent.inbound_filter()
+        {
+            total += filter.estimated_count();
+            has_data = true;
+        }
+
+        // Children's filters: each child's subtree is disjoint
+        for (peer_addr, peer) in &self.peers {
+            if let Some(decl) = self.tree_state.peer_declaration(peer_addr)
+                && *decl.parent_id() == my_addr
+            {
+                child_count += 1;
+                if let Some(filter) = peer.inbound_filter() {
+                    total += filter.estimated_count();
+                    has_data = true;
+                }
+            }
+        }
+
+        if !has_data {
+            self.estimated_mesh_size = None;
+            return;
+        }
+
+        let size = total.round() as u64;
+        self.estimated_mesh_size = Some(size);
+
+        // Periodic logging (reuse MMP default interval: 30s)
+        let now = std::time::Instant::now();
+        let should_log = match self.last_mesh_size_log {
+            None => true,
+            Some(last) => now.duration_since(last) >= std::time::Duration::from_secs(
+                self.config.node.mmp.log_interval_secs,
+            ),
+        };
+        if should_log {
+            tracing::info!(
+                estimated_mesh_size = size,
+                peers = self.peers.len(),
+                children = child_count,
+                "Mesh size estimate"
+            );
+            self.last_mesh_size_log = Some(now);
+        }
     }
 
     // === Coord Cache ===

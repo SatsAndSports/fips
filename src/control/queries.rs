@@ -58,6 +58,7 @@ pub fn show_status(node: &Node) -> Value {
         "pid": pid,
         "exe_path": exe_path,
         "uptime_secs": uptime_secs,
+        "estimated_mesh_size": node.estimated_mesh_size(),
         "forwarding": serde_json::to_value(&fwd).unwrap_or_default(),
     })
 }
