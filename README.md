@@ -154,14 +154,14 @@ transports:
   #   auto_connect: true
   #   accept_connections: true
 
-peers: []
+peers:
   # Static peers for bootstrapping (UDP or TCP):
-  # - npub: "npub1..."
-  #   alias: "gateway"
-  #   addresses:
-  #     - transport: udp
-  #       addr: "217.77.8.91:2121"  # public FIPS testing node
-  #   connect_policy: auto_connect
+  - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
+    alias: "fips-test-node"
+    addresses:
+      - transport: udp
+        addr: "217.77.8.91:2121"
+    connect_policy: auto_connect
 ```
 
 See [docs/design/fips-configuration.md](docs/design/fips-configuration.md)
