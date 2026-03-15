@@ -160,6 +160,24 @@ fn draw_table(
                 let addr = t.get("local_addr").and_then(|v| v.as_str()).unwrap_or("");
                 let label = if !name.is_empty() {
                     format!("{indicator}{typ} {name}")
+                } else if typ == "tor" {
+                    let mode = t
+                        .get("tor_mode")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("socks5");
+                    let onion_hint = t
+                        .get("onion_address")
+                        .and_then(|v| v.as_str())
+                        .map(|a| {
+                            let short = if a.len() > 16 {
+                                &a[..16]
+                            } else {
+                                a
+                            };
+                            format!(" {short}..")
+                        })
+                        .unwrap_or_default();
+                    format!("{indicator}tor({mode}){onion_hint}")
                 } else if !addr.is_empty() {
                     format!("{indicator}{typ} {addr}")
                 } else {
@@ -328,6 +346,14 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
         lines.push(helpers::kv_line("Local Addr", addr));
     }
 
+    // Tor-specific info
+    if let Some(mode) = t.get("tor_mode").and_then(|v| v.as_str()) {
+        lines.push(helpers::kv_line("Tor Mode", mode));
+    }
+    if let Some(onion) = t.get("onion_address").and_then(|v| v.as_str()) {
+        lines.push(helpers::kv_line("Onion Address", onion));
+    }
+
     // Transport stats
     if let Some(stats) = t.get("stats") {
         let typ = helpers::str_field(t, "type");
@@ -424,6 +450,42 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
                     &helpers::nested_u64(t, "stats", "connect_refused"),
                 ));
             }
+            "tor" => {
+                lines.push(helpers::kv_line(
+                    "MTU Exceeded",
+                    &helpers::nested_u64(t, "stats", "mtu_exceeded"),
+                ));
+                lines.push(helpers::kv_line(
+                    "SOCKS5 Errors",
+                    &helpers::nested_u64(t, "stats", "socks5_errors"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Control Errors",
+                    &helpers::nested_u64(t, "stats", "control_errors"),
+                ));
+                lines.push(Line::from(""));
+                lines.push(helpers::section_header("Connections"));
+                lines.push(helpers::kv_line(
+                    "Established",
+                    &helpers::nested_u64(t, "stats", "connections_established"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Accepted",
+                    &helpers::nested_u64(t, "stats", "connections_accepted"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Rejected",
+                    &helpers::nested_u64(t, "stats", "connections_rejected"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Timeouts",
+                    &helpers::nested_u64(t, "stats", "connect_timeouts"),
+                ));
+                lines.push(helpers::kv_line(
+                    "Refused",
+                    &helpers::nested_u64(t, "stats", "connect_refused"),
+                ));
+            }
             "ethernet" => {
                 lines.push(Line::from(""));
                 lines.push(helpers::section_header("Beacons"));
@@ -447,6 +509,54 @@ fn draw_transport_detail(frame: &mut Frame, app: &App, area: Rect, t: &serde_jso
                 ));
             }
             _ => {}
+        }
+
+        // Tor daemon monitoring (when control port data is available)
+        if let Some(mon) = t.get("tor_monitoring") {
+            lines.push(Line::from(""));
+            lines.push(helpers::section_header("Tor Daemon"));
+            lines.push(helpers::kv_line(
+                "Bootstrap",
+                &format!("{}%", helpers::nested_u64(t, "tor_monitoring", "bootstrap")),
+            ));
+            lines.push(helpers::kv_line(
+                "Circuit",
+                if mon
+                    .get("circuit_established")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    "established"
+                } else {
+                    "none"
+                },
+            ));
+            lines.push(helpers::kv_line(
+                "Version",
+                &helpers::nested_str(t, "tor_monitoring", "version"),
+            ));
+            lines.push(helpers::kv_line(
+                "Network",
+                &helpers::nested_str(t, "tor_monitoring", "network_liveness"),
+            ));
+            lines.push(helpers::kv_line("Dormant", helpers::bool_field(mon, "dormant")));
+
+            let tor_read = mon
+                .get("traffic_read")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let tor_written = mon
+                .get("traffic_written")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            lines.push(helpers::kv_line(
+                "Tor Read",
+                &helpers::format_bytes(tor_read),
+            ));
+            lines.push(helpers::kv_line(
+                "Tor Written",
+                &helpers::format_bytes(tor_written),
+            ));
         }
     }
 

@@ -6,6 +6,7 @@
 
 pub mod udp;
 pub mod tcp;
+pub mod tor;
 
 #[cfg(target_os = "linux")]
 pub mod ethernet;
@@ -13,6 +14,8 @@ pub mod ethernet;
 use secp256k1::XOnlyPublicKey;
 use udp::UdpTransport;
 use tcp::TcpTransport;
+use tor::control::TorMonitoringInfo;
+use tor::TorTransport;
 #[cfg(target_os = "linux")]
 use ethernet::EthernetTransport;
 use std::fmt;
@@ -842,6 +845,8 @@ pub enum TransportHandle {
     Ethernet(EthernetTransport),
     /// TCP/IP transport.
     Tcp(TcpTransport),
+    /// Tor transport (via SOCKS5).
+    Tor(TorTransport),
 }
 
 impl TransportHandle {
@@ -852,6 +857,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.start_async().await,
             TransportHandle::Tcp(t) => t.start_async().await,
+            TransportHandle::Tor(t) => t.start_async().await,
         }
     }
 
@@ -862,6 +868,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.stop_async().await,
             TransportHandle::Tcp(t) => t.stop_async().await,
+            TransportHandle::Tor(t) => t.stop_async().await,
         }
     }
 
@@ -872,6 +879,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
             TransportHandle::Tcp(t) => t.send_async(addr, data).await,
+            TransportHandle::Tor(t) => t.send_async(addr, data).await,
         }
     }
 
@@ -882,6 +890,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.transport_id(),
             TransportHandle::Tcp(t) => t.transport_id(),
+            TransportHandle::Tor(t) => t.transport_id(),
         }
     }
 
@@ -892,6 +901,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.name(),
             TransportHandle::Tcp(t) => t.name(),
+            TransportHandle::Tor(t) => t.name(),
         }
     }
 
@@ -902,6 +912,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.transport_type(),
             TransportHandle::Tcp(t) => t.transport_type(),
+            TransportHandle::Tor(t) => t.transport_type(),
         }
     }
 
@@ -912,6 +923,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.state(),
             TransportHandle::Tcp(t) => t.state(),
+            TransportHandle::Tor(t) => t.state(),
         }
     }
 
@@ -922,6 +934,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.mtu(),
             TransportHandle::Tcp(t) => t.mtu(),
+            TransportHandle::Tor(t) => t.mtu(),
         }
     }
 
@@ -935,16 +948,18 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.link_mtu(addr),
             TransportHandle::Tcp(t) => t.link_mtu(addr),
+            TransportHandle::Tor(t) => t.link_mtu(addr),
         }
     }
 
-    /// Get the local bound address (UDP only, returns None for other transports).
+    /// Get the local bound address (UDP/TCP only, returns None for other transports).
     pub fn local_addr(&self) -> Option<std::net::SocketAddr> {
         match self {
             TransportHandle::Udp(t) => t.local_addr(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(_) => None,
             TransportHandle::Tcp(t) => t.local_addr(),
+            TransportHandle::Tor(_) => None,
         }
     }
 
@@ -955,6 +970,31 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => Some(t.interface_name()),
             TransportHandle::Tcp(_) => None,
+            TransportHandle::Tor(_) => None,
+        }
+    }
+
+    /// Get the onion service address (Tor only, returns None for other transports).
+    pub fn onion_address(&self) -> Option<&str> {
+        match self {
+            TransportHandle::Tor(t) => t.onion_address(),
+            _ => None,
+        }
+    }
+
+    /// Get cached Tor daemon monitoring info (Tor only).
+    pub fn tor_monitoring(&self) -> Option<TorMonitoringInfo> {
+        match self {
+            TransportHandle::Tor(t) => t.cached_monitoring(),
+            _ => None,
+        }
+    }
+
+    /// Get the Tor transport mode (Tor only).
+    pub fn tor_mode(&self) -> Option<&str> {
+        match self {
+            TransportHandle::Tor(t) => Some(t.mode()),
+            _ => None,
         }
     }
 
@@ -965,6 +1005,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.discover(),
             TransportHandle::Tcp(t) => t.discover(),
+            TransportHandle::Tor(t) => t.discover(),
         }
     }
 
@@ -975,6 +1016,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.auto_connect(),
             TransportHandle::Tcp(t) => t.auto_connect(),
+            TransportHandle::Tor(t) => t.auto_connect(),
         }
     }
 
@@ -985,6 +1027,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.accept_connections(),
             TransportHandle::Tcp(t) => t.accept_connections(),
+            TransportHandle::Tor(t) => t.accept_connections(),
         }
     }
 
@@ -1001,6 +1044,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(_) => Ok(()), // connectionless
             TransportHandle::Tcp(t) => t.connect_async(addr).await,
+            TransportHandle::Tor(t) => t.connect_async(addr).await,
         }
     }
 
@@ -1015,12 +1059,13 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(_) => ConnectionState::Connected,
             TransportHandle::Tcp(t) => t.connection_state_sync(addr),
+            TransportHandle::Tor(t) => t.connection_state_sync(addr),
         }
     }
 
     /// Close a specific connection on this transport.
     ///
-    /// No-op for connectionless transports. For TCP, removes the
+    /// No-op for connectionless transports. For TCP/Tor, removes the
     /// connection from the pool and drops the stream.
     pub async fn close_connection(&self, addr: &TransportAddr) {
         match self {
@@ -1028,6 +1073,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(t) => t.close_connection(addr),
             TransportHandle::Tcp(t) => t.close_connection_async(addr).await,
+            TransportHandle::Tor(t) => t.close_connection_async(addr).await,
         }
     }
 
@@ -1047,6 +1093,7 @@ impl TransportHandle {
             #[cfg(target_os = "linux")]
             TransportHandle::Ethernet(_) => TransportCongestion::default(),
             TransportHandle::Tcp(_) => TransportCongestion::default(),
+            TransportHandle::Tor(_) => TransportCongestion::default(),
         }
     }
 
@@ -1075,6 +1122,9 @@ impl TransportHandle {
                 })
             }
             TransportHandle::Tcp(t) => {
+                serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
+            }
+            TransportHandle::Tor(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
         }

@@ -442,6 +442,225 @@ If `bind_addr` is configured, the transport accepts inbound connections.
 Without it, the transport operates in outbound-only mode (no listener
 socket is created).
 
+## Tor: The Anonymity Transport
+
+The Tor transport routes FIPS traffic through the Tor network, hiding
+a node's IP address from its peers. A node behind Tor connects outbound
+through a local Tor SOCKS5 proxy; the remote peer sees the Tor exit
+node's IP, not the initiator's. After the Noise IK handshake, the remote
+peer knows the initiator's FIPS identity (npub) but not its network
+location.
+
+Like TCP, Tor is connection-oriented and reliable. The same TCP-over-TCP
+considerations apply — MMP correctly measures the elevated latency and
+cost-based parent selection naturally deprioritizes Tor links.
+
+### Architecture
+
+The Tor transport is a separate `TorTransport` implementation, not a TCP
+variant, because it manages SOCKS5 proxy negotiation, has different
+address semantics (.onion vs IP:port), and has significantly different
+latency characteristics. It reuses the FMP header-based stream reader
+(`tcp/stream.rs`) for packet framing on the underlying TCP connection.
+
+The transport maintains two pools (same pattern as TCP): a
+`ConnectingPool` for background SOCKS5 connection attempts, and an
+established pool of `TorConnection` entries. Each `TorConnection` holds
+a write half, a per-connection receive task, the negotiated MTU, and
+a connection timestamp.
+
+| Property | Value |
+| -------- | ----- |
+| Addressing | .onion:port or IP:port |
+| Default MTU | 1400 bytes |
+| Framing | FMP header-based (shared with TCP) |
+| Connection model | Non-blocking connect, outbound SOCKS5 + inbound via onion service |
+| Platform | Cross-platform (requires external Tor daemon) |
+
+### Address Types
+
+The Tor transport accepts three address formats, parsed into a `TorAddr`
+enum:
+
+- **Onion**: `.onion:port` — connects to a Tor hidden service. Both
+  sides anonymous. (e.g., `abcdef...xyz.onion:8443`)
+- **Clearnet IP**: `IP:port` — connects through a Tor exit node to a
+  remote TCP listener. Hides the initiator's IP; the remote peer sees
+  the exit node's IP.
+- **Clearnet Hostname**: `hostname:port` — hostname is passed through
+  SOCKS5 for Tor-side DNS resolution, avoiding local DNS leaks. Compatible
+  with SafeSocks 1. (e.g., `fips.example.com:8443`)
+
+All address types are routed through the same SOCKS5 proxy.
+
+### Connection Establishment
+
+Connection setup follows the same non-blocking pattern as TCP. When FMP
+needs to reach a peer, the node calls `connect(addr)` on the transport.
+The transport spawns a background tokio task that:
+
+1. Opens a SOCKS5 connection through the local Tor proxy
+2. Configures the socket: `TCP_NODELAY`, keepalive (30s)
+3. Returns the connected stream
+
+The call returns immediately. `connection_state(addr)` reports progress.
+Tor circuit establishment typically takes 10–60 seconds (vs milliseconds
+for TCP), making non-blocking connect essential — a blocking connect
+would stall the entire FMP event loop.
+
+The connect timeout defaults to 120 seconds (vs 5 seconds for TCP),
+accounting for Tor circuit setup time. As a fallback, `send(addr, data)`
+performs synchronous connect-on-send if no connection exists.
+
+### Inbound via Onion Service (Directory Mode)
+
+In `directory` mode (recommended for production), Tor manages the onion
+service via `HiddenServiceDir` in `torrc`. FIPS reads the `.onion` address
+from the hostname file at startup and binds a local TCP listener that the
+Tor daemon forwards inbound connections to.
+
+This mode enables Tor's `Sandbox 1` (seccomp-bpf) — the strongest single
+hardening option — because no control port interaction is required for
+onion service management. Tor handles key generation and persistence
+directly through the `HiddenServiceDir`.
+
+The inbound accept loop mirrors the TCP transport's pattern: accept
+connection, configure socket (TCP_NODELAY, keepalive), spawn a
+per-connection receive loop using the shared FMP stream reader. Inbound
+connections arrive from `127.0.0.1` (Tor daemon's local forwarding); peer
+identity is resolved during the Noise IK handshake, not from the transport
+address.
+
+Configuration requires coordinating `torrc` and `fips.yaml`:
+
+```text
+# torrc
+HiddenServiceDir /var/lib/tor/fips
+HiddenServicePort 8443 127.0.0.1:8444
+
+# fips.yaml tor section
+mode: "directory"
+directory_service:
+  hostname_file: "/var/lib/tor/fips/hostname"
+  bind_addr: "127.0.0.1:8444"
+```
+
+The `HiddenServicePort` external port (8443) is what peers connect to.
+The bind_addr must match the `HiddenServicePort` target address.
+
+### Session Independence
+
+Same as TCP: Tor connection loss does **not** tear down the FIPS peer.
+Noise keys, MMP state, and FSP sessions survive reconnection.
+
+### Bridge Node Pattern
+
+A node running both Tor and UDP transports acts as a bridge between
+anonymous and clearnet portions of the mesh:
+
+```text
+[Anonymous node] --tor--> [Bridge node] --udp--> [Clearnet node]
+```
+
+No special code is needed — FIPS multi-transport routing handles it.
+Anonymous nodes connect to the bridge via Tor; the bridge forwards
+traffic to clearnet peers over UDP. Clearnet peers never see the
+anonymous node's IP.
+
+### Latency Characteristics
+
+Tor adds 200ms–2s RTT per circuit. First-packet latency after connection
+is higher (~2.8s) due to circuit warm-up. MMP measures this elevated
+latency, and cost-based parent selection penalizes Tor links (high SRTT
+→ high link cost). ETX is 1.0 since TCP handles retransmission.
+
+Tor throughput is typically 1–5 Mbps — adequate for control plane and
+moderate data transfer, not for bulk transfer.
+
+### Monitoring
+
+In `control_port` mode and optionally in `directory` mode (when
+`control_addr` is configured), the transport spawns a background
+monitoring task that polls the Tor daemon every 10 seconds via the
+control port. The cached monitoring data is exposed through the
+`show_transports` control socket query and displayed in fipstop.
+
+Monitoring data includes:
+
+- **Bootstrap progress** (0–100%) with INFO logging at milestones
+  (25/50/75/100%) and WARN if stalled >60s
+- **Circuit status** (whether Tor has a working circuit)
+- **Network liveness** (up/down) with WARN on transitions
+- **Dormant mode** detection with WARN on entry
+- **Tor daemon version** and **traffic counters** (bytes read/written)
+
+The control port connection uses cookie authentication by default
+(reading from `/var/run/tor/control.authcookie`). Unix socket
+connections (`/run/tor/control`) are preferred over TCP for security.
+
+### Configuration
+
+```yaml
+transports:
+  tor:
+    mode: "socks5"                  # "socks5", "control_port", or "directory"
+    socks5_addr: "127.0.0.1:9050"  # SOCKS5 proxy address
+    connect_timeout_ms: 120000     # Connect timeout (120s for Tor circuits)
+    mtu: 1400                      # Default MTU
+    # control_port mode: monitoring via Tor control port (no inbound)
+    # control_addr: "/run/tor/control"   # Unix socket (preferred) or host:port
+    # control_auth: "cookie"             # "cookie" or "password:<secret>"
+    # cookie_path: "/var/run/tor/control.authcookie"
+    # directory mode: inbound via Tor-managed HiddenServiceDir
+    # directory_service:
+    #   hostname_file: "/var/lib/tor/fips/hostname"
+    #   bind_addr: "127.0.0.1:8444"
+    # max_inbound_connections: 64
+```
+
+Three modes are available:
+
+- **`socks5`** (default): Outbound-only through a SOCKS5 proxy. No
+  control port, no inbound connections.
+- **`control_port`**: Outbound via SOCKS5 plus control port connection
+  for Tor daemon monitoring. No inbound connections.
+- **`directory`** (recommended for inbound): Outbound via SOCKS5 plus
+  inbound via Tor-managed `HiddenServiceDir` onion service. Optionally
+  connects to the control port for monitoring when `control_addr` is set.
+  Enables Tor's `Sandbox 1` for maximum security.
+
+The Tor transport requires an external Tor daemon. Named instances are
+supported for multiple proxy endpoints.
+
+### Implementation Roadmap
+
+- Outbound SOCKS5 connections to .onion, clearnet IP, and clearnet
+  hostname addresses *(implemented)*
+- Inbound connections via Tor onion service using `HiddenServiceDir`
+  directory mode *(implemented)*
+- Operator visibility: cached monitoring snapshot, control socket
+  exposure, fipstop display, bootstrap/liveness logging *(implemented)*
+- Embedded `arti` (Rust Tor implementation) for self-contained operation
+  without an external Tor daemon *(future)*
+
+### Statistics
+
+The transport tracks per-instance statistics:
+
+| Counter | Description |
+| ------- | ----------- |
+| `packets_sent` / `bytes_sent` | Successful sends |
+| `packets_recv` / `bytes_recv` | Successful receives |
+| `send_errors` / `recv_errors` | Send/receive failures |
+| `connections_established` | Successful SOCKS5 connections |
+| `connect_timeouts` | Connection timeout count |
+| `connect_refused` | Connection refused count |
+| `socks5_errors` | SOCKS5 protocol errors |
+| `mtu_exceeded` | Packets rejected for MTU violation |
+| `connections_accepted` | Accepted inbound connections via onion service |
+| `connections_rejected` | Rejected inbound connections (limit exceeded) |
+| `control_errors` | Tor control port errors |
+
 ## Discovery
 
 Discovery determines that a FIPS-capable endpoint is reachable at a given
@@ -450,7 +669,7 @@ detection — a new TCP connection or UDP packet from an unknown source is not
 discovery; a FIPS-specific announcement or response is.
 
 Discovery is an optional transport capability. Transports that don't support
-it (configured UDP endpoints, TCP) simply don't provide discovery events.
+it (configured UDP endpoints, TCP, Tor) simply don't provide discovery events.
 FMP handles both cases uniformly: with discovery, it waits for events then
 initiates link setup; without discovery, it initiates link setup directly to
 configured addresses.
@@ -499,13 +718,13 @@ Key properties:
 
 ### Current State
 
-> **Implemented**: UDP and TCP peers are configured via YAML. Ethernet
-> peers are discovered via beacon broadcast — the `discover()` trait
-> method returns newly seen endpoints, and per-transport `auto_connect()`
-> / `accept_connections()` policies control whether discovered peers are
-> connected automatically or require explicit configuration. TCP has no
-> discovery mechanism (peers are configured). Nostr relay discovery is
-> not yet implemented.
+> **Implemented**: UDP, TCP, Tor, and Ethernet peers can be configured
+> statically via YAML. Ethernet peers can also be discovered via beacon
+> broadcast — the `discover()` trait method returns newly seen endpoints,
+> and per-transport `auto_connect()` / `accept_connections()` policies
+> control whether discovered peers are connected automatically or require
+> explicit configuration. TCP and Tor have no discovery mechanism.
+> Nostr relay discovery is not yet implemented.
 
 ## Transport Interface
 
@@ -582,8 +801,9 @@ on all forwarded datagrams.
 | Transport | Congestion Source | Mechanism |
 | --------- | ----------------- | --------- |
 | UDP | `SO_RXQ_OVFL` kernel drop counter | `recvmsg()` ancillary data on every packet |
-| TCP | Not yet implemented | Returns `None` (TCP handles congestion internally) |
-| Ethernet | Not yet implemented | Returns `None` |
+| TCP | Not implemented | Returns `None` (TCP handles congestion internally) |
+| Tor | Not implemented | Returns `None` (TCP handles congestion internally) |
+| Ethernet | Not implemented | Returns `None` |
 
 ### Transport Addresses
 
@@ -611,7 +831,7 @@ transitions through `Starting` to `Up` (operational). `stop()` moves to
 | TCP/IP | **Implemented** | FMP header-based framing, non-blocking connect, per-connection MSS MTU |
 | Ethernet | **Implemented** | AF_PACKET SOCK_DGRAM, EtherType 0x2121, beacon discovery, Linux only |
 | WiFi | Future direction | Infrastructure mode = Ethernet driver |
-| Tor | Future direction | High latency, .onion addressing |
+| Tor | **Implemented** | Outbound SOCKS5, inbound via onion service, .onion and clearnet addressing |
 | BLE | Future direction | ATT_MTU negotiation, per-link MTU |
 | Radio | Future direction | Constrained MTU (51–222 bytes) |
 | Serial | Future direction | SLIP/COBS framing, point-to-point |

@@ -1,4 +1,5 @@
 # FIPS: Free Internetworking Peering System
+
 ![banner](docs/logos/fips_banner.png)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
@@ -241,7 +242,7 @@ testing/      Docker-based integration test harnesses
 ## Status & Roadmap
 
 FIPS is at **v0.1.0 (alpha)**. The core protocol works end-to-end over
-UDP, TCP, and Ethernet but has not been tested beyond small meshes.
+UDP, TCP, Ethernet, and Tor but has not been tested beyond small meshes.
 
 ### What works today
 
@@ -254,14 +255,14 @@ UDP, TCP, and Ethernet but has not been tested beyond small meshes.
 - Static hostname mapping (`/etc/fips/hosts`) with auto-reload
 - Per-link metrics (RTT, loss, jitter, goodput) and mesh size estimation
 - ECN congestion signaling (hop-by-hop CE relay, IPv6 CE marking, kernel drop detection)
-- UDP, TCP, and Ethernet transports
+- UDP, TCP, Ethernet, and Tor transports (SOCKS5 outbound + directory-mode onion service inbound)
 - Runtime inspection via `fipsctl` and `fipstop`
 - Docker-based integration and chaos testing
 
 ### Near-term priorities
 
 - Peer discovery via Nostr relays (bootstrap without static peer lists)
-- Additional transports (Bluetooth, Tor)
+- Additional transports (Bluetooth)
 - Improved routing resilience under churn
 - Security audit of cryptographic protocols
 

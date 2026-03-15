@@ -21,7 +21,8 @@ Datagram-oriented transports (UDP, raw Ethernet, radio) preserve natural
 packet boundaries and require no additional framing. Stream-oriented
 transports (TCP, WebSocket, Tor) must delineate FIPS packets within the
 byte stream; the common prefix `payload_len` field provides this
-framing directly.
+framing directly. TCP and Tor share a common stream reader
+(`tcp/stream.rs`) that implements this framing.
 
 **Ethernet data frame header.** The Ethernet transport prepends a 3-byte
 header before the FMP payload on data frames: a 1-byte frame type

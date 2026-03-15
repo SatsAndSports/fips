@@ -373,6 +373,111 @@ transports:
       max_inbound_connections: 64
 ```
 
+### Tor (`transports.tor.*`)
+
+Tor transport routes FIPS traffic through the Tor network for anonymity.
+Requires an external Tor daemon providing a SOCKS5 proxy. Three modes:
+`socks5` for outbound-only, `control_port` for outbound + monitoring,
+`directory` for outbound + inbound via Tor-managed onion service.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `transports.tor.mode` | string | `"socks5"` | Tor access mode: `socks5` (outbound only), `control_port` (outbound + monitoring), or `directory` (outbound + inbound onion service) |
+| `transports.tor.socks5_addr` | string | `"127.0.0.1:9050"` | SOCKS5 proxy address (host:port) |
+| `transports.tor.connect_timeout_ms` | u64 | `120000` | Connect timeout in milliseconds. Tor circuits take 10–60s. |
+| `transports.tor.mtu` | u16 | `1400` | Default MTU |
+| `transports.tor.control_addr` | string | `"/run/tor/control"` | Tor control port address: Unix socket path or host:port. Used in `control_port` mode; optional in `directory` mode for monitoring. |
+| `transports.tor.control_auth` | string | `"cookie"` | Control port authentication: `"cookie"`, `"cookie:/path/to/cookie"`, or `"password:<secret>"`. |
+| `transports.tor.cookie_path` | string | `"/var/run/tor/control.authcookie"` | Path to Tor control cookie file. Used when `control_auth` is `"cookie"`. |
+| `transports.tor.max_inbound_connections` | usize | `64` | Maximum inbound connections via onion service. |
+| `transports.tor.directory_service.hostname_file` | string | `"/var/lib/tor/fips_onion_service/hostname"` | Path to Tor-managed hostname file containing the `.onion` address. |
+| `transports.tor.directory_service.bind_addr` | string | `"127.0.0.1:8443"` | Local bind address for the listener that Tor forwards inbound connections to. Must match `HiddenServicePort` target in `torrc`. |
+
+**Named instances.** Like other transports, multiple Tor instances can
+be configured with named sub-keys for different SOCKS5 proxy endpoints.
+
+**Directory mode** (recommended for production). Tor manages the onion
+service via `HiddenServiceDir` in `torrc`. FIPS reads the `.onion`
+address from the hostname file and binds a local TCP listener. This
+enables Tor's `Sandbox 1` (seccomp-bpf). If `control_addr` is also
+set, the transport connects to the control port for daemon monitoring
+(non-fatal on failure).
+
+**Control port mode.** Connects to the Tor daemon's control port for
+monitoring only (bootstrap status, circuit health, traffic stats).
+No inbound connections. Both `control_addr` and `control_auth` are
+required.
+
+### UDP + Tor Bridge Example
+
+A node bridging clearnet (UDP) and anonymous (Tor) portions of the mesh:
+
+```yaml
+node:
+  identity:
+    persistent: true
+
+tun:
+  enabled: true
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+    mtu: 1472
+  tor:
+    socks5_addr: "127.0.0.1:9050"
+
+peers:
+  - npub: "npub1abc..."
+    alias: "clearnet-peer"
+    addresses:
+      - transport: udp
+        addr: "203.0.113.5:2121"
+  - npub: "npub1def..."
+    alias: "anonymous-peer"
+    addresses:
+      - transport: tor
+        addr: "abc123...xyz.onion:2121"
+```
+
+### Tor Directory Mode Example
+
+A node accepting inbound connections via Tor-managed onion service
+(recommended for production — enables Sandbox 1):
+
+```yaml
+node:
+  identity:
+    persistent: true
+
+tun:
+  enabled: true
+
+transports:
+  tor:
+    mode: "directory"
+    socks5_addr: "127.0.0.1:9050"
+    control_addr: "/run/tor/control"    # optional, for monitoring
+    control_auth: "cookie"
+    directory_service:
+      hostname_file: "/var/lib/tor/fips/hostname"
+      bind_addr: "127.0.0.1:8444"
+
+peers:
+  - npub: "npub1abc..."
+    alias: "tor-peer"
+    addresses:
+      - transport: tor
+        addr: "abcdef...xyz.onion:8443"
+```
+
+Requires a corresponding `torrc`:
+
+```text
+HiddenServiceDir /var/lib/tor/fips
+HiddenServicePort 8443 127.0.0.1:8444
+```
+
 ## Peers (`peers[]`)
 
 Static peer list. Each entry defines a peer to connect to.
@@ -381,8 +486,8 @@ Static peer list. Each entry defines a peer to connect to.
 |-----------|------|---------|-------------|
 | `peers[].npub` | string | *(required)* | Peer's Nostr public key (npub-encoded) |
 | `peers[].alias` | string | *(none)* | Human-readable name for logging |
-| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, or `ethernet` |
-| `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP/TCP: `"host:port"` (IP or DNS hostname). Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`) |
+| `peers[].addresses[].transport` | string | *(required)* | Transport type: `udp`, `tcp`, `ethernet`, or `tor` |
+| `peers[].addresses[].addr` | string | *(required)* | Transport address. UDP/TCP: `"host:port"` (IP or DNS hostname). Ethernet: `"interface/mac"` (e.g., `"eth0/aa:bb:cc:dd:ee:ff"`). Tor: `".onion:port"` or `"host:port"` |
 | `peers[].addresses[].priority` | u8 | `100` | Address priority (lower = preferred) |
 | `peers[].connect_policy` | string | `"auto_connect"` | Connection policy: `auto_connect`, `on_demand`, or `manual` |
 | `peers[].auto_reconnect` | bool | `true` | Automatically reconnect after MMP link-dead removal (exponential backoff, unlimited retries) |
@@ -589,6 +694,20 @@ transports:
   #   recv_buf_size: 2097152         # 2 MB
   #   send_buf_size: 2097152         # 2 MB
   #   max_inbound_connections: 256   # resource protection limit
+  # tor:                             # uncomment to enable Tor transport
+  #   mode: "socks5"                 # "socks5", "control_port", or "directory"
+  #   socks5_addr: "127.0.0.1:9050" # SOCKS5 proxy address
+  #   connect_timeout_ms: 120000    # connect timeout (120s for Tor circuits)
+  #   mtu: 1400                     # default MTU
+  #   # monitoring (control_port mode, or optional in directory mode):
+  #   # control_addr: "/run/tor/control"   # Unix socket or host:port
+  #   # control_auth: "cookie"             # "cookie" or "password:<secret>"
+  #   # cookie_path: "/var/run/tor/control.authcookie"
+  #   # directory mode (inbound via Tor-managed onion service):
+  #   # directory_service:
+  #   #   hostname_file: "/var/lib/tor/fips/hostname"
+  #   #   bind_addr: "127.0.0.1:8444"
+  #   # max_inbound_connections: 64
 
 peers:                               # static peer list
   # - npub: "npub1..."

@@ -1,0 +1,56 @@
+# Tor transport integration test — directory mode
+#
+# Topology:
+#   [fips-a] — Tor + FIPS co-located, HiddenServiceDir onion service
+#   [fips-b] — Tor + FIPS co-located, socks5-only, connects to fips-a's .onion
+#
+# Both nodes run Tor and FIPS in the same container. Node A's Tor manages
+# the onion service via HiddenServiceDir with Sandbox 1. Node B connects
+# outbound through its local Tor's SOCKS5 proxy.
+
+networks:
+  dir-test:
+    driver: bridge
+
+services:
+  fips-a:
+    build:
+      context: .
+      dockerfile: Dockerfile.colocated
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    restart: "no"
+    container_name: fips-dir-a
+    hostname: fips-dir-a
+    volumes:
+      - ./configs/node-a.yaml:/etc/fips/fips.yaml:ro
+    environment:
+      - RUST_LOG=info,fips::transport::tor=debug
+    networks:
+      dir-test:
+
+  fips-b:
+    build:
+      context: .
+      dockerfile: Dockerfile.colocated
+      args:
+        TORRC: torrc.socks5
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    restart: "no"
+    container_name: fips-dir-b
+    hostname: fips-dir-b
+    volumes:
+      - ./configs/node-b.yaml:/etc/fips/fips.yaml:ro
+    environment:
+      - RUST_LOG=info,fips::transport::tor=debug
+    networks:
+      dir-test:

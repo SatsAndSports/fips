@@ -20,6 +20,16 @@ configurations.
 | tcp-chain   | 3     | TCP       | Linear chain over TCP (port 8443) |
 | rekey       | 5     | UDP       | Rekey integration test topology  |
 
+### [tor/](tor/) -- Tor Transport Integration
+
+End-to-end Tor transport testing with Docker containers running real
+Tor daemons. Requires internet access for Tor bootstrapping.
+
+| Scenario       | Description                                              |
+| -------------- | -------------------------------------------------------- |
+| socks5-outbound | Outbound SOCKS5 connections through Tor to clearnet peer |
+| directory-mode  | Inbound via HiddenServiceDir onion service (co-located)  |
+
 ### [chaos/](chaos/) -- Stochastic Simulation
 
 Automated network testing with configurable node counts, topology

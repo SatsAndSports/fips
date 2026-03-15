@@ -13,6 +13,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   can now use `host:port` with either IP addresses or DNS hostnames (e.g.,
   `"peer1.example.com:2121"`). DNS resolution with 60-second cache for UDP,
   one-shot resolution at connect time for TCP.
+- Tor transport with three operating modes:
+  - `socks5` mode: outbound connections to .onion, clearnet IP, and
+    clearnet hostname addresses via SOCKS5 proxy with per-destination
+    circuit isolation (IsolateSOCKSAuth)
+  - `directory` mode: inbound via Tor-managed `HiddenServiceDir` onion
+    service, enables Tor Sandbox 1 (seccomp-bpf)
+  - `control_port` mode: Tor daemon monitoring via async control port client
+    with cookie and password authentication
+  - Optional control port monitoring in directory mode when `control_addr`
+    is configured
+  - Docker integration tests for SOCKS5 outbound and directory-mode inbound
+- Tor operator visibility:
+  - Background monitoring task polling Tor daemon status every 10s
+  - `show_transports` query exposes `tor_mode`, `onion_address`, and
+    `tor_monitoring` (bootstrap, circuits, liveness, traffic, version)
+  - fipstop Tor transport detail view with daemon status, connection stats,
+    and truncated onion address in table view
+  - Bootstrap milestone logging (25/50/75/100%), stall warning, network
+    liveness transitions, dormant mode alerts
 
 ## [0.1.0] - 2026-03-12
 

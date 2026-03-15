@@ -490,6 +490,18 @@ pub fn show_transports(node: &Node) -> Value {
             t_json["local_addr"] = json!(format!("{}", addr));
         }
 
+        // Tor-specific fields
+        if let Some(mode) = handle.tor_mode() {
+            t_json["tor_mode"] = json!(mode);
+        }
+        if let Some(onion) = handle.onion_address() {
+            t_json["onion_address"] = json!(onion);
+        }
+        if let Some(monitoring) = handle.tor_monitoring() {
+            t_json["tor_monitoring"] =
+                serde_json::to_value(&monitoring).unwrap_or_default();
+        }
+
         t_json["stats"] = handle.transport_stats();
 
         t_json
