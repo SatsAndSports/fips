@@ -1,0 +1,11 @@
+[package]
+name = "keytool"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+secp256k1 = { version = "0.30", features = ["rand"] }
+rand = "0.8"
+sha2 = "0.10"
+bech32 = "0.11"
+hex = "0.4"
