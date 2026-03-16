@@ -9,7 +9,7 @@
 #   ./push.sh collector.fips
 #   ./push.sh npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt.fips
 
-COLLECTOR="${1:-node-collector.fips}"
+COLLECTOR="${1:-npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt.fips}"
 
 STATUS=$(fipsctl show status 2>/dev/null)
 TREE=$(fipsctl show tree 2>/dev/null)

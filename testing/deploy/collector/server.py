@@ -64,6 +64,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({"ok": True, "id": report_id}).encode() + b"\n")
 
     def do_GET(self):
+        if self.path == "/":
+            try:
+                with open("/opt/collector/push.sh", "r") as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(content.encode())
+                return
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"Error reading push.sh: {e}\n".encode())
+                return
+
         if self.path == "/reports":
             conn = sqlite3.connect(DB_PATH)
             rows = conn.execute(
