@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FIPS topology collector — stores raw reports in SQLite.
 
-Listens on [::]:8080.
+Listens on [::]:80.
 
   POST /report  — store a JSON report (status + tree + peers)
   GET  /reports — list recent reports (last 100)
@@ -113,8 +113,8 @@ class HTTPServerV6(HTTPServer):
 
 if __name__ == "__main__":
     init_db()
-    server = HTTPServerV6(("::", 8080), Handler)
-    print(f"[collector] listening on [::]:8080, db={DB_PATH}")
+    server = HTTPServerV6(("::", 80), Handler)
+    print(f"[collector] listening on [::]:80, db={DB_PATH}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
