@@ -25,6 +25,7 @@ services:
     hostname: node-root
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
+      - ./collector:/opt/collector:ro
       - ./generated-configs/podman-mesh/node-root85g6.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -38,6 +39,7 @@ services:
       - "2121:2121/udp"
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
+      - ./collector:/opt/collector:ro
       - ./generated-configs/podman-mesh/node-a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -49,6 +51,7 @@ services:
     hostname: node-b
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
+      - ./collector:/opt/collector:ro
       - ./generated-configs/podman-mesh/node-b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -60,6 +63,7 @@ services:
     hostname: node-c
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
+      - ./collector:/opt/collector:ro
       - ./generated-configs/podman-mesh/node-c.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
@@ -72,8 +76,8 @@ services:
     entrypoint: ["/bin/bash", "/opt/collector/entrypoint.sh"]
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./generated-configs/podman-mesh/node-collector.yaml:/etc/fips/fips.yaml:ro
       - ./collector:/opt/collector:ro
+      - ./collector/fips.yaml:/etc/fips/fips.yaml:ro
       - ./data:/data
     networks:
       fips-net:
