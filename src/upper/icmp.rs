@@ -687,4 +687,57 @@ mod tests {
         // Response must not exceed minimum MTU
         assert!(response.len() <= MIN_IPV6_MTU);
     }
+
+    /// Verify that when the ICMP source is set to the original packet's
+    /// destination (the remote peer), the PTB is correctly formed.
+    ///
+    /// This is the critical fix for the PMTUD blackhole: Linux ignores
+    /// ICMPv6 PTBs whose source matches a local address. By using the
+    /// remote peer's address as the ICMP source, the kernel sees the PTB
+    /// as coming from a "remote router" and honors it.
+    #[test]
+    fn test_build_packet_too_big_remote_source_for_pmtud() {
+        let local_addr: Ipv6Addr = "fd41::1".parse().unwrap();
+        let remote_addr: Ipv6Addr = "fddf::2".parse().unwrap();
+        let original = make_ipv6_packet(local_addr, remote_addr, 6, &[0u8; 1200]); // TCP
+
+        // Pass remote_addr as our_addr — this is what send_icmpv6_packet_too_big
+        // does after the fix (original packet's dst = remote peer).
+        let response = build_packet_too_big(&original, 1203, remote_addr);
+        assert!(response.is_some());
+        let response = response.unwrap();
+
+        // PTB source must be the remote peer (not local)
+        let ptb_src = Ipv6Addr::from(<[u8; 16]>::try_from(&response[8..24]).unwrap());
+        assert_eq!(
+            ptb_src, remote_addr,
+            "PTB source must be remote peer address"
+        );
+
+        // PTB destination must be the local sender (original src)
+        let ptb_dst = Ipv6Addr::from(<[u8; 16]>::try_from(&response[24..40]).unwrap());
+        assert_eq!(
+            ptb_dst, local_addr,
+            "PTB destination must be original sender"
+        );
+
+        // Verify ICMPv6 type/code
+        assert_eq!(response[IPV6_HEADER_LEN], 2); // Type = Packet Too Big
+        assert_eq!(response[IPV6_HEADER_LEN + 1], 0); // Code = 0
+
+        // Verify reported MTU
+        let reported_mtu = u32::from_be_bytes([
+            response[IPV6_HEADER_LEN + 4],
+            response[IPV6_HEADER_LEN + 5],
+            response[IPV6_HEADER_LEN + 6],
+            response[IPV6_HEADER_LEN + 7],
+        ]);
+        assert_eq!(reported_mtu, 1203);
+
+        // Verify checksum is valid (recalculate and compare)
+        let stored_checksum =
+            u16::from_be_bytes([response[IPV6_HEADER_LEN + 2], response[IPV6_HEADER_LEN + 3]]);
+        let recomputed = icmpv6_checksum(&response[IPV6_HEADER_LEN..], &remote_addr, &local_addr);
+        assert_eq!(stored_checksum, recomputed, "ICMPv6 checksum must be valid");
+    }
 }

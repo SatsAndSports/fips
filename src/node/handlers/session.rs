@@ -1662,7 +1662,6 @@ impl Node {
     /// misconfigured applications sending repeated oversized packets.
     pub(in crate::node) fn send_icmpv6_packet_too_big(&mut self, original_packet: &[u8], mtu: u32) {
         use crate::upper::icmp::build_packet_too_big;
-        use crate::FipsAddress;
         use std::net::Ipv6Addr;
 
         // Extract source address for rate limiting
@@ -1680,18 +1679,20 @@ impl Node {
             return;
         }
 
-        let our_ipv6 = FipsAddress::from_node_addr(self.node_addr()).to_ipv6();
-        if let Some(response) = build_packet_too_big(original_packet, mtu, our_ipv6)
+        // Use the original packet's *destination* as the ICMP source so the
+        // kernel sees the PTB coming from a remote router, not from itself.
+        // Linux ignores PTBs whose source matches a local address, which
+        // causes a PMTUD blackhole when both src and ICMP-src are local.
+        let dest_addr = Ipv6Addr::from(<[u8; 16]>::try_from(&original_packet[24..40]).unwrap());
+        if let Some(response) = build_packet_too_big(original_packet, mtu, dest_addr)
             && let Some(tun_tx) = &self.tun_tx
         {
             debug!(
-                src = %src_addr,
-                dst = %our_ipv6,
+                original_src = %src_addr,
+                original_dst = %dest_addr,
                 packet_size = original_packet.len(),
                 reported_mtu = mtu,
-                "Sending ICMP Packet Too Big (ICMP src={}, dst={})",
-                our_ipv6,
-                src_addr
+                "Sending ICMP Packet Too Big"
             );
             let _ = tun_tx.send(response);
         }
