@@ -1,0 +1,48 @@
+# Deploy Mesh Topology
+#
+# Four local nodes + external VPS peer. root85g6 has a ground node_addr
+# (000016d3...) to guarantee it wins spanning tree root election.
+#
+#                    VPS (217.77.8.91)
+#                     │
+#   node-b ─── node-a (gateway) ─── root85g6 (local root)
+#     │            │                     │
+#     └── node-c ──┘─────────────────────┘
+#
+# root-v5bp peers with all local nodes. node-a remains the gateway to
+# the external VPS. All local nodes form a full mesh.
+#
+# Usage:
+#   ./scripts/generate-configs.sh podman-mesh <mesh-name>
+#
+# The mesh-name argument derives deterministic keys for local nodes.
+
+nodes:
+  root85g6:
+    docker_ip: "172.20.0.13"
+    peers: [a, b, c, collector]
+
+  a:
+    docker_ip: "172.20.0.10"
+    peers: [root85g6, b, c, collector, vps]
+
+  b:
+    docker_ip: "172.20.0.11"
+    peers: [root85g6, a, c, collector]
+
+  c:
+    docker_ip: "172.20.0.12"
+    peers: [root85g6, a, b, collector]
+
+  # Topology collector (vanity npub, hand-written config — generation skipped)
+  # Uses external_ip so generator uses the explicit npub and skips config generation.
+  collector:
+    npub: "npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt"
+    external_ip: "172.20.0.14"
+    peers: [root85g6, a, b, c]
+
+  # External VPS peer (not a container — config generation is skipped)
+  vps:
+    npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
+    external_ip: "217.77.8.91"
+    peers: [a]

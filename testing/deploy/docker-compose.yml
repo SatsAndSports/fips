@@ -1,0 +1,80 @@
+networks:
+  fips-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+x-fips-common: &fips-common
+  build:
+    context: .
+  cap_add:
+    - NET_ADMIN
+  devices:
+    - /dev/net/tun:/dev/net/tun
+  sysctls:
+    - net.ipv6.conf.all.disable_ipv6=0
+  restart: "no"
+  environment:
+    - RUST_LOG=info
+
+services:
+  node-root:
+    <<: *fips-common
+    container_name: fips-node-root
+    hostname: node-root
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/podman-mesh/node-root85g6.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.13
+
+  node-a:
+    <<: *fips-common
+    container_name: fips-node-a
+    hostname: node-a
+    ports:
+      - "2121:2121/udp"
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/podman-mesh/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.10
+
+  node-b:
+    <<: *fips-common
+    container_name: fips-node-b
+    hostname: node-b
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/podman-mesh/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.11
+
+  node-c:
+    <<: *fips-common
+    container_name: fips-node-c
+    hostname: node-c
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/podman-mesh/node-c.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.12
+
+  node-collector:
+    <<: *fips-common
+    container_name: fips-node-collector
+    hostname: node-collector
+    entrypoint: ["/bin/bash", "/opt/collector/entrypoint.sh"]
+    volumes:
+      - ./resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/podman-mesh/node-collector.yaml:/etc/fips/fips.yaml:ro
+      - ./collector:/opt/collector:ro
+      - ./data:/data
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.14

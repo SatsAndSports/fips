@@ -1,0 +1,1 @@
+../../static/scripts/derive-keys.py

@@ -1,0 +1,13 @@
+# Compiled FIPS binaries (copied into build context)
+/fips
+/fipsctl
+/fipstop
+
+# Generated configs (reproducible from scripts)
+/generated-configs/
+
+# Runtime data
+/data/
+
+# Rust build output (keytool)
+/tools/keytool/target/
