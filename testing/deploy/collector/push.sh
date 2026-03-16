@@ -9,7 +9,7 @@
 #   ./push.sh collector.fips
 #   ./push.sh npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt.fips
 
-COLLECTOR="${1:-collector.fips}"
+COLLECTOR="${1:-node-collector.fips}"
 
 STATUS=$(fipsctl show status 2>/dev/null)
 TREE=$(fipsctl show tree 2>/dev/null)
@@ -20,7 +20,7 @@ if [ -z "$STATUS" ] || [ -z "$TREE" ] || [ -z "$PEERS" ]; then
     exit 1
 fi
 
-curl -6 -s -g -X POST "http://[$COLLECTOR]:8080/report" \
+curl -6 -g -X POST "http://$COLLECTOR:8080/report" \
     -H "Content-Type: application/json" \
     -d "{\"status\": $STATUS, \"tree\": $TREE, \"peers\": $PEERS}"
 echo
