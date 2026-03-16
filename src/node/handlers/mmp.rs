@@ -72,7 +72,7 @@ impl Node {
     ///
     /// The peer is telling us about what they received from us. We feed
     /// this to our metrics to compute RTT, loss rate, and trend indicators.
-    pub(in crate::node) fn handle_receiver_report(&mut self, from: &NodeAddr, payload: &[u8]) {
+    pub(in crate::node) async fn handle_receiver_report(&mut self, from: &NodeAddr, payload: &[u8]) {
         let rr = match ReceiverReport::decode(payload) {
             Ok(rr) => rr,
             Err(e) => {
@@ -101,7 +101,7 @@ impl Node {
         // Process the report: computes RTT from timestamp echo, updates
         // loss rate, goodput rate, jitter trend, and ETX.
         let now = Instant::now();
-        mmp.metrics.process_receiver_report(&rr, our_timestamp_ms, now);
+        let first_rtt = mmp.metrics.process_receiver_report(&rr, our_timestamp_ms, now);
 
         // Feed SRTT back to sender/receiver report interval tuning
         if let Some(srtt_ms) = mmp.metrics.srtt_ms() {
@@ -126,6 +126,47 @@ impl Node {
             etx = format_args!("{:.2}", mmp.metrics.etx),
             "Processed ReceiverReport"
         );
+
+        // First RTT sample — peer is now eligible for parent selection.
+        // Trigger re-evaluation so the node doesn't wait for the next
+        // periodic tick or TreeAnnounce.
+        if first_rtt {
+            let peer_costs: std::collections::HashMap<crate::NodeAddr, f64> = self.peers.iter()
+                .filter(|(_, p)| p.has_srtt())
+                .map(|(a, p)| (*a, p.link_cost()))
+                .collect();
+            if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
+                let new_seq = self.tree_state.my_declaration().sequence() + 1;
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let flap_dampened = self.tree_state.set_parent(new_parent, new_seq, timestamp);
+                if let Err(e) = self.tree_state.sign_declaration(&self.identity) {
+                    warn!(error = %e, "Failed to sign declaration after first-RTT parent eval");
+                    return;
+                }
+                self.tree_state.recompute_coords();
+                self.coord_cache.clear();
+                self.stats_mut().tree.parent_switched += 1;
+                self.stats_mut().tree.parent_switches += 1;
+                info!(
+                    new_parent = %self.peer_display_name(&new_parent),
+                    new_seq = new_seq,
+                    new_root = %self.tree_state.root(),
+                    depth = self.tree_state.my_coords().depth(),
+                    trigger = "first-rtt",
+                    "Parent switched after first RTT measurement"
+                );
+                if flap_dampened {
+                    self.stats_mut().tree.flap_dampened += 1;
+                    warn!("Flap dampening engaged: excessive parent switches detected");
+                }
+                self.send_tree_announce_to_all().await;
+                let all_peers: Vec<crate::NodeAddr> = self.peers.keys().copied().collect();
+                self.bloom_state.mark_all_updates_needed(all_peers);
+            }
+        }
     }
 
     /// Check all peers for pending MMP reports and send them.

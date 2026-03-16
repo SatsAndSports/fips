@@ -211,8 +211,11 @@ impl Node {
             self.bloom_state.mark_update_needed(*from);
         }
 
-        // Re-evaluate parent selection with current link costs
+        // Re-evaluate parent selection with current link costs.
+        // Exclude peers without MMP RTT data — they are not yet eligible
+        // as parent candidates (prevents oscillation from optimistic defaults).
         let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+            .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
         if let Some(new_parent) = self.tree_state.evaluate_parent(&peer_costs) {
@@ -263,6 +266,7 @@ impl Node {
                     "Parent ancestry contains us — loop detected, dropping parent"
                 );
                 let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                    .filter(|(_, peer)| peer.has_srtt())
                     .map(|(addr, peer)| (*addr, peer.link_cost()))
                     .collect();
                 if self.tree_state.handle_parent_lost(&peer_costs) {
@@ -354,6 +358,7 @@ impl Node {
         self.last_parent_reeval = Some(now);
 
         let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+            .filter(|(_, peer)| peer.has_srtt())
             .map(|(addr, peer)| (*addr, peer.link_cost()))
             .collect();
 
@@ -410,6 +415,7 @@ impl Node {
         if was_parent {
             self.stats_mut().tree.parent_losses += 1;
             let peer_costs: HashMap<NodeAddr, f64> = self.peers.iter()
+                .filter(|(_, peer)| peer.has_srtt())
                 .map(|(addr, peer)| (*addr, peer.link_cost()))
                 .collect();
             let changed = self.tree_state.handle_parent_lost(&peer_costs);

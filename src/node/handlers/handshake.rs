@@ -176,6 +176,11 @@ impl Node {
                         "Peer restart detected (epoch mismatch), removing stale session"
                     );
                     self.remove_active_peer(&peer_node_addr);
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    self.schedule_reconnect(peer_node_addr, now_ms);
                     // Fall through to process as new connection
                 }
                 _ => {
@@ -196,6 +201,55 @@ impl Node {
                         && existing_peer.is_healthy()
                         && session_age_secs >= 30
                     {
+                        // Guard: already have a pending session from a completed
+                        // rekey (waiting for K-bit cutover). Don't overwrite it
+                        // with a new handshake — drop this msg1.
+                        if existing_peer.pending_new_session().is_some() {
+                            debug!(
+                                peer = %self.peer_display_name(&peer_node_addr),
+                                "Rekey msg1 received but already have pending session, dropping"
+                            );
+                            self.connections.remove(&link_id);
+                            self.links.remove(&link_id);
+                            self.msg1_rate_limiter.complete_handshake();
+                            return;
+                        }
+
+                        // Dual-initiation detection: both sides sent msg1
+                        // simultaneously. Apply tie-breaker — smaller NodeAddr
+                        // wins as initiator (same as cross-connection resolution).
+                        if existing_peer.rekey_in_progress() {
+                            let our_addr = self.identity.node_addr();
+                            if our_addr < &peer_node_addr {
+                                // We win as initiator — drop their msg1.
+                                // Our msg2 will arrive at peer, who completes
+                                // as our responder.
+                                debug!(
+                                    peer = %self.peer_display_name(&peer_node_addr),
+                                    "Dual rekey initiation: we win (smaller addr), dropping their msg1"
+                                );
+                                self.connections.remove(&link_id);
+                                self.links.remove(&link_id);
+                                self.msg1_rate_limiter.complete_handshake();
+                                return;
+                            }
+                            // We lose — abandon our rekey, become responder below.
+                            debug!(
+                                peer = %self.peer_display_name(&peer_node_addr),
+                                "Dual rekey initiation: we lose (larger addr), abandoning ours"
+                            );
+                            if let Some(peer) = self.peers.get_mut(&peer_node_addr)
+                                && let Some(idx) = peer.abandon_rekey()
+                            {
+                                if let Some(tid) = peer.transport_id() {
+                                    self.peers_by_index.remove(&(tid, idx.as_u32()));
+                                    self.pending_outbound.remove(&(tid, idx.as_u32()));
+                                }
+                                let _ = self.index_allocator.free(idx);
+                            }
+                            // Fall through to respond as responder
+                        }
+
                         // Rekey: process as responder, store new session as pending
                         let noise_session = conn.take_session();
                         let our_new_index = match self.index_allocator.allocate() {

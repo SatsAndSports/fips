@@ -593,6 +593,12 @@ impl ActivePeer {
         }
     }
 
+    /// Whether this peer has at least one MMP RTT measurement.
+    pub fn has_srtt(&self) -> bool {
+        self.mmp()
+            .is_some_and(|mmp| mmp.metrics.srtt_ms().is_some())
+    }
+
     /// When this peer was authenticated.
     pub fn authenticated_at(&self) -> u64 {
         self.authenticated_at

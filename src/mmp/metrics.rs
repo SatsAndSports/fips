@@ -89,7 +89,12 @@ impl MmpMetrics {
     ///
     /// `our_timestamp_ms` is the current session-relative time in ms (for RTT).
     /// `now` is the current monotonic time (for goodput rate computation).
-    pub fn process_receiver_report(&mut self, rr: &ReceiverReport, our_timestamp_ms: u32, now: Instant) {
+    ///
+    /// Returns `true` if this report produced the first SRTT measurement
+    /// (transition from uninitialized to initialized).
+    pub fn process_receiver_report(&mut self, rr: &ReceiverReport, our_timestamp_ms: u32, now: Instant) -> bool {
+        let had_srtt = self.srtt.initialized();
+
         // --- RTT from timestamp echo ---
         // RTT = now - echoed_timestamp - dwell_time
         if rr.timestamp_echo > 0 {
@@ -159,6 +164,8 @@ impl MmpMetrics {
         self.prev_rr_ecn_ce = rr.ecn_ce_count;
         self.prev_rr_reorder = rr.cumulative_reorder_count;
         self.prev_rr_time = Some(now);
+
+        !had_srtt && self.srtt.initialized()
     }
 
     /// Update the reverse delivery ratio (from our own receiver state about the peer's traffic).

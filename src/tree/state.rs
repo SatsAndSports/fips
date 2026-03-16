@@ -340,7 +340,15 @@ impl TreeState {
             if coords.contains(&self.my_node_addr) {
                 continue;
             }
-            let cost = peer_costs.get(peer_id).copied().unwrap_or(1.0);
+            // If any peer has MMP cost data, only consider measured peers.
+            // This prevents freshly connected peers (no SRTT, default cost 1.0)
+            // from appearing artificially cheap. During cold start (no peer has
+            // MMP data, peer_costs is empty), fall back to default cost 1.0.
+            let cost = match peer_costs.get(peer_id) {
+                Some(&c) => c,
+                None if peer_costs.is_empty() => 1.0,
+                None => continue,
+            };
             let eff_depth = coords.depth() as f64 + cost;
             match &best_peer {
                 None => best_peer = Some((*peer_id, eff_depth)),
@@ -396,11 +404,14 @@ impl TreeState {
 
         // --- Same root, cost-aware comparison with hysteresis ---
 
-        // Current parent's effective_depth
+        // Current parent's effective_depth.
+        // If peer_costs is non-empty but current parent has no entry,
+        // treat as maximally expensive so any measured candidate can win.
+        // If peer_costs is empty (cold start), use default cost 1.0.
         let current_parent_cost = peer_costs
             .get(self.my_declaration.parent_id())
             .copied()
-            .unwrap_or(1.0);
+            .unwrap_or(if peer_costs.is_empty() { 1.0 } else { f64::INFINITY });
         let current_parent_coords = self.peer_ancestry.get(self.my_declaration.parent_id());
         let current_parent_eff = match current_parent_coords {
             Some(coords) => coords.depth() as f64 + current_parent_cost,

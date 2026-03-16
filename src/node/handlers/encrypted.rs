@@ -5,7 +5,7 @@ use crate::node::Node;
 use crate::node::wire::{EncryptedHeader, strip_inner_header, FLAG_CE, FLAG_KEY_EPOCH, FLAG_SP};
 use crate::transport::ReceivedPacket;
 use std::time::Instant;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Force-remove a peer after this many consecutive decryption failures.
 const DECRYPT_FAILURE_THRESHOLD: u32 = 20;
@@ -32,7 +32,7 @@ impl Node {
         let node_addr = match self.peers_by_index.get(&key) {
             Some(id) => *id,
             None => {
-                debug!(
+                trace!(
                     receiver_idx = %header.receiver_idx,
                     transport_id = %packet.transport_id,
                     "Unknown session index, dropping"
@@ -221,7 +221,13 @@ impl Node {
                     consecutive_failures = count,
                     "Excessive decryption failures, removing peer"
                 );
+                let addr = *node_addr;
                 self.remove_active_peer(node_addr);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.schedule_reconnect(addr, now_ms);
             }
         }
     }

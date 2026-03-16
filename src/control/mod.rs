@@ -54,6 +54,16 @@ impl ControlSocket {
         }
 
         let listener = UnixListener::bind(&socket_path)?;
+
+        // Make the socket and its parent directory group-accessible so
+        // 'fips' group members can use fipsctl/fipstop without root.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o770))?;
+        Self::chown_to_fips_group(&socket_path);
+        if let Some(parent) = socket_path.parent() {
+            Self::chown_to_fips_group(parent);
+        }
+
         info!(path = %socket_path.display(), "Control socket listening");
 
         Ok(Self {
@@ -82,6 +92,34 @@ impl ControlSocket {
                 std::fs::remove_file(path)?;
                 Ok(())
             }
+        }
+    }
+
+    /// Set group ownership of a path to the 'fips' group (best-effort).
+    fn chown_to_fips_group(path: &Path) {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        // Look up the 'fips' group
+        let group_name = CString::new("fips").unwrap();
+        let grp = unsafe { libc::getgrnam(group_name.as_ptr()) };
+        if grp.is_null() {
+            debug!("'fips' group not found, skipping chown for {}", path.display());
+            return;
+        }
+        let gid = unsafe { (*grp).gr_gid };
+
+        let c_path = match CString::new(path.as_os_str().as_bytes()) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let ret = unsafe { libc::chown(c_path.as_ptr(), u32::MAX, gid) };
+        if ret != 0 {
+            warn!(
+                path = %path.display(),
+                error = %std::io::Error::last_os_error(),
+                "Failed to chown control socket to 'fips' group"
+            );
         }
     }
 

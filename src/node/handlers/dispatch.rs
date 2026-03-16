@@ -27,7 +27,7 @@ impl Node {
             }
             0x02 => {
                 // ReceiverReport
-                self.handle_receiver_report(from, payload);
+                self.handle_receiver_report(from, payload).await;
             }
             0x10 => {
                 // TreeAnnounce

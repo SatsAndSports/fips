@@ -410,7 +410,37 @@ impl Node {
             } else if existing.is_established() {
                 // Rekey: if rekey enabled, treat as rekey for key rotation.
                 // The existing established session remains active for traffic.
-                if self.config.node.rekey.enabled && !existing.has_rekey_in_progress() {
+                if self.config.node.rekey.enabled {
+                    let rekey_in_progress = existing.has_rekey_in_progress();
+                    let has_pending = existing.pending_new_session().is_some();
+
+                    // Dual-initiation detection: both sides sent SessionSetup
+                    // simultaneously. Apply tie-breaker — smaller NodeAddr
+                    // wins as initiator (same as initial session setup).
+                    if rekey_in_progress {
+                        if self.identity.node_addr() < src_addr {
+                            // We win as initiator — drop their msg1.
+                            debug!(
+                                src = %self.peer_display_name(src_addr),
+                                "Dual FSP rekey initiation: we win (smaller addr), dropping their msg1"
+                            );
+                            return;
+                        }
+                        // We lose — abandon our rekey, become responder below.
+                        debug!(
+                            src = %self.peer_display_name(src_addr),
+                            "Dual FSP rekey initiation: we lose (larger addr), abandoning ours"
+                        );
+                        let entry = self.sessions.get_mut(src_addr).unwrap();
+                        entry.abandon_rekey();
+                    } else if has_pending {
+                        // Guard: already have a pending session waiting for K-bit cutover
+                        debug!(
+                            src = %self.peer_display_name(src_addr),
+                            "FSP rekey msg1 received but already have pending session, dropping"
+                        );
+                        return;
+                    }
                     let our_keypair = self.identity.keypair();
                     let mut handshake = HandshakeState::new_xk_responder(our_keypair);
                     handshake.set_local_epoch(self.startup_epoch);

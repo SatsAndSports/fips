@@ -10,11 +10,10 @@ Restart=on-failure
 RestartSec=5
 
 # Logging: RUST_LOG controls verbosity.
-# Use "info" for production, "debug" for troubleshooting.
-Environment=RUST_LOG=info
+Environment=RUST_LOG=debug
 
 # Control socket directory (/run/fips/).
-# Group-readable so 'fips' group members can use fipsctl/fipstop.
+# Group-accessible so 'fips' group members can use fipsctl/fipstop.
 RuntimeDirectory=fips
 RuntimeDirectoryMode=0750
 
