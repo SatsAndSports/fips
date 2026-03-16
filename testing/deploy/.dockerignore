@@ -1,0 +1,6 @@
+# Only include the FIPS binaries in the build context.
+# Everything else (configs, scripts, symlinks) is host-side only.
+*
+!fips
+!fipsctl
+!fipstop
