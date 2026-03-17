@@ -24,7 +24,7 @@ nodes:
 
   a:
     docker_ip: "172.20.0.10"
-    peers: [root85g6, b, c, collector, vps]
+    peers: [root85g6, b, c, collector, vps, nostr_a]
 
   b:
     docker_ip: "172.20.0.11"
@@ -40,6 +40,13 @@ nodes:
     npub: "npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt"
     external_ip: "172.20.0.14"
     peers: [root85g6, a, b, c]
+
+  # nostr_a: bridges between the UDP mesh and Nostr-only nostr_b.
+  # Config is hand-written (configs/nostr/), but included here so the
+  # generator adds it as a UDP peer in node-a's config.
+  nostr_a:
+    docker_ip: "172.20.0.20"
+    peers: [a]
 
   # External VPS peer (not a container — config generation is skipped)
   vps:

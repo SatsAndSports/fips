@@ -89,7 +89,7 @@ services:
     hostname: node-nostr-a
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/nostr/node-nostr-a.yaml:/etc/fips/fips.yaml:ro
+      - ./configs/nostr/node-nostr_a.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.20
@@ -100,7 +100,7 @@ services:
     hostname: node-nostr-b
     volumes:
       - ./resolv.conf:/etc/resolv.conf:ro
-      - ./configs/nostr/node-nostr-b.yaml:/etc/fips/fips.yaml:ro
+      - ./configs/nostr/node-nostr_b.yaml:/etc/fips/fips.yaml:ro
     networks:
       fips-net:
         ipv4_address: 172.20.0.21
