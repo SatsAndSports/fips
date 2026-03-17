@@ -15,20 +15,23 @@ and the collected data can be visualized as a Graphviz SVG diagram.
                VPS (217.77.8.91, external)
                 |
               node-a (gateway, depth 1)
-                |
+                |          \
     root85g6 (root, depth 0, ground node_addr for tree root election)
-             / | \
+             / | \          \
         node-b node-c collector (vanity npub: npub1mesh...)
-
-
-    nostr-a ~~~relay~~~ nostr-b   (isolated Nostr-only pair)
+                              \
+                         nostr_a (UDP + Nostr bridge)
+                              |
+                        ~~~relay~~~
+                              |
+                         nostr_b (Nostr-only)
 ```
 
 - 5 local containers on a Docker bridge network (172.20.0.0/24),
   connected via UDP transport
-- 2 local containers (nostr-a, nostr-b) connected exclusively via
-  Nostr ephemeral events through an external relay — isolated from
-  the UDP mesh
+- 2 local containers (nostr_a, nostr_b) connected via Nostr ephemeral
+  events through an external relay — nostr_a also peers with node-a
+  over UDP, bridging nostr_b into the main mesh
 - 1 external VPS peer, connected through node-a
 - root85g6 wins tree root election via a ground node_addr (000016d3...)
 - The collector has a vanity npub starting with `npub1mesh`, ground
@@ -203,13 +206,17 @@ with `#[ignore]` so they don't run in CI.
 
 ### Docker test nodes
 
-Two isolated Nostr-only nodes are included in the Docker deployment:
+Two Nostr-enabled nodes are included in the Docker deployment:
 
-- `node-nostr-a` (172.20.0.20) — peers with nostr-b over Nostr relay
-- `node-nostr-b` (172.20.0.21) — peers with nostr-a over Nostr relay
+- `node-nostr-a` (172.20.0.20) — peers with nostr_b over Nostr relay,
+  and with node-a over UDP (bridges Nostr into the main mesh)
+- `node-nostr-b` (172.20.0.21) — peers with nostr_a over Nostr relay
+  only (Nostr-only node, reaches UDP mesh via nostr_a)
 
 Their hand-written configs live in `testing/deploy/configs/nostr/`.
-They form an isolated 2-node network and do not peer with the UDP mesh.
+The `nostr_a` node also appears in the topology file
+(`configs/topologies/podman-mesh.yaml`) so that the config generator
+includes it as a UDP peer in node-a's generated config.
 
 The relay URL is configured in their YAML configs. Update the `relays:`
 field to point to an accessible Nostr relay that accepts kind 21210
@@ -223,6 +230,9 @@ docker compose -f testing/deploy/docker-compose.yml up -d node-nostr-a node-nost
 docker exec fips-node-nostr-a fipsctl show peers
 
 # Ping through the mesh via Nostr relay
+docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
+
+# Ping between Nostr-only nodes (via relay)
 docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
 
 # Check logs
@@ -243,6 +253,9 @@ docker exec fips-node-b ping6 -c3 vps.fips
 
 # Ping between Nostr-only nodes (via relay)
 docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
+
+# Ping from Nostr-only node to UDP mesh (cross-transport routing)
+docker exec fips-node-nostr-b ping6 -c3 node-a.fips
 
 # Interactive TUI dashboard
 docker exec -it fips-node-a fipstop

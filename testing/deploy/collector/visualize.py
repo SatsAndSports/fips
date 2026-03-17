@@ -111,15 +111,21 @@ def build_graph(reports):
             is_tree = peer.get("is_parent", False) or peer.get("is_child", False)
             rtt = peer.get("mmp", {}).get("srtt_ms")
 
+            transport_type = peer.get("transport_type", "")
+
             if edge_key not in edges:
                 edges[edge_key] = {
                     "ever_tree": False,
                     "current_tree": False,
                     "rtt": None,
+                    "transport_type": "",
                     # Track parent->child direction for tree edges
                     "parent": None,
                     "child": None,
                 }
+
+            if transport_type:
+                edges[edge_key]["transport_type"] = transport_type
 
             if is_tree:
                 edges[edge_key]["ever_tree"] = True
@@ -180,10 +186,14 @@ def build_graph(reports):
                     edges[edge_key]["parent"] = reporter_addr
                     edges[edge_key]["child"] = peer_addr
 
-                # Update RTT from latest
+                # Update RTT and transport type from latest
                 rtt = peer.get("mmp", {}).get("srtt_ms")
                 if rtt is not None:
                     edges[edge_key]["rtt"] = rtt
+
+                transport_type = peer.get("transport_type", "")
+                if transport_type:
+                    edges[edge_key]["transport_type"] = transport_type
 
     return nodes, edges
 
@@ -250,7 +260,10 @@ def generate_dot(nodes, edges):
             continue
         seen_edges.add(edge_id)
 
-        rtt_label = f"{info['rtt']:.1f}ms" if info.get("rtt") is not None else ""
+        rtt_str = f"{info['rtt']:.1f}ms" if info.get("rtt") is not None else ""
+        transport_str = info.get("transport_type", "")
+        label_parts = [p for p in [rtt_str, transport_str] if p]
+        rtt_label = "\\n".join(label_parts)
 
         if info["current_tree"]:
             # Current tree edge: solid black, directed parent->child
