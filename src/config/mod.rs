@@ -34,7 +34,7 @@ pub use node::{
     TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
-pub use transport::{DirectoryServiceConfig, EthernetConfig, TcpConfig, TorConfig, TransportInstances, TransportsConfig, UdpConfig};
+pub use transport::{DirectoryServiceConfig, EthernetConfig, NostrConfig, TcpConfig, TorConfig, TransportInstances, TransportsConfig, UdpConfig};
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";

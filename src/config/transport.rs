@@ -499,6 +499,58 @@ impl TorConfig {
 }
 
 // ============================================================================
+// Nostr Transport Configuration
+// ============================================================================
+
+/// Default Nostr event kind (ephemeral).
+const DEFAULT_NOSTR_KIND: u32 = 21210;
+
+/// Default Nostr MTU (IPv6 minimum).
+const DEFAULT_NOSTR_MTU: u16 = 1280;
+
+/// Nostr transport instance configuration.
+///
+/// Uses ephemeral Nostr events relayed through WebSocket relays for
+/// transport. The node's FIPS identity keypair is reused for signing
+/// Nostr events. Peers are addressed by their hex-encoded x-only pubkey.
+///
+/// ```yaml
+/// transports:
+///   nostr:
+///     relays:
+///       - "ws://127.0.0.1:7777"
+///     kind: 21210
+///     mtu: 1280
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NostrConfig {
+    /// Relay WebSocket URLs. Required — at least one relay must be specified.
+    #[serde(default)]
+    pub relays: Vec<String>,
+
+    /// Nostr event kind. Defaults to 21210 (ephemeral).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<u32>,
+
+    /// MTU for Nostr transport. Defaults to 1280 (IPv6 minimum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u16>,
+}
+
+impl NostrConfig {
+    /// Get the event kind. Default: 21210.
+    pub fn kind(&self) -> u32 {
+        self.kind.unwrap_or(DEFAULT_NOSTR_KIND)
+    }
+
+    /// Get the MTU. Default: 1280.
+    pub fn mtu(&self) -> u16 {
+        self.mtu.unwrap_or(DEFAULT_NOSTR_MTU)
+    }
+}
+
+// ============================================================================
 // TransportsConfig
 // ============================================================================
 
@@ -523,6 +575,10 @@ pub struct TransportsConfig {
     /// Tor transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub tor: TransportInstances<TorConfig>,
+
+    /// Nostr transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub nostr: TransportInstances<NostrConfig>,
 }
 
 /// Helper for skip_serializing_if on TransportInstances.
@@ -534,6 +590,7 @@ impl TransportsConfig {
     /// Check if any transports are configured.
     pub fn is_empty(&self) -> bool {
         self.udp.is_empty() && self.ethernet.is_empty() && self.tcp.is_empty() && self.tor.is_empty()
+            && self.nostr.is_empty()
     }
 
     /// Merge another TransportsConfig into this one.
@@ -551,6 +608,9 @@ impl TransportsConfig {
         }
         if !other.tor.is_empty() {
             self.tor = other.tor;
+        }
+        if !other.nostr.is_empty() {
+            self.nostr = other.nostr;
         }
     }
 }
