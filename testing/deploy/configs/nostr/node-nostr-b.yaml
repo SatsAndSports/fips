@@ -1,0 +1,30 @@
+# FIPS Node nostr-b configuration (Nostr transport only)
+#
+# Identity: npub1yud5nvcaxv4w9v3tkhrke6mke36u26qj9wj284s0j2mnhzqusfssnkx78w
+# Peers with nostr-a exclusively over Nostr relay.
+
+node:
+  identity:
+    nsec: "bffdb79a6da13ebc77c80e77be987d2bd5b3fe637c00bc7635f6063fd47f89b8"
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+
+transports:
+  nostr:
+    relays:
+      - "ws://80.78.18.182:7777"
+
+peers:
+  - npub: "npub1tecdav0j7380fpq6x7s05s60qvpukeafhztzlqq23psxjl2cwskqm026dr"
+    alias: "node-nostr-a"
+    addresses:
+      - transport: nostr
+        addr: "5e70deb1f2f44ef4841a37a0fa434f0303cb67a9b8962f800a8860697d58742c"
+    connect_policy: auto_connect

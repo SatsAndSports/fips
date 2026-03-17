@@ -7,6 +7,7 @@
 pub mod udp;
 pub mod tcp;
 pub mod tor;
+pub mod nostr;
 
 #[cfg(target_os = "linux")]
 pub mod ethernet;
@@ -18,6 +19,7 @@ use udp::UdpTransport;
 use tcp::TcpTransport;
 use tor::control::TorMonitoringInfo;
 use tor::TorTransport;
+use nostr::NostrTransport;
 #[cfg(target_os = "linux")]
 use ethernet::EthernetTransport;
 #[cfg(target_os = "linux")]
@@ -230,6 +232,13 @@ impl TransportType {
         name: "tor",
         connection_oriented: true,
         reliable: true,
+    };
+
+    /// Nostr relay transport (ephemeral events).
+    pub const NOSTR: TransportType = TransportType {
+        name: "nostr",
+        connection_oriented: false,
+        reliable: false,
     };
 
     /// Serial/UART transport.
@@ -858,6 +867,8 @@ pub enum TransportHandle {
     Tcp(TcpTransport),
     /// Tor transport (via SOCKS5).
     Tor(TorTransport),
+    /// Nostr relay transport (ephemeral events).
+    Nostr(NostrTransport),
     /// BLE L2CAP transport.
     #[cfg(target_os = "linux")]
     Ble(DefaultBleTransport),
@@ -872,6 +883,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.start_async().await,
             TransportHandle::Tcp(t) => t.start_async().await,
             TransportHandle::Tor(t) => t.start_async().await,
+            TransportHandle::Nostr(t) => t.start_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.start_async().await,
         }
@@ -885,6 +897,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.stop_async().await,
             TransportHandle::Tcp(t) => t.stop_async().await,
             TransportHandle::Tor(t) => t.stop_async().await,
+            TransportHandle::Nostr(t) => t.stop_async().await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.stop_async().await,
         }
@@ -898,6 +911,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.send_async(addr, data).await,
             TransportHandle::Tcp(t) => t.send_async(addr, data).await,
             TransportHandle::Tor(t) => t.send_async(addr, data).await,
+            TransportHandle::Nostr(t) => t.send_async(addr, data).await,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.send_async(addr, data).await,
         }
@@ -911,6 +925,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.transport_id(),
             TransportHandle::Tcp(t) => t.transport_id(),
             TransportHandle::Tor(t) => t.transport_id(),
+            TransportHandle::Nostr(t) => t.transport_id(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_id(),
         }
@@ -924,6 +939,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.name(),
             TransportHandle::Tcp(t) => t.name(),
             TransportHandle::Tor(t) => t.name(),
+            TransportHandle::Nostr(t) => t.name(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.name(),
         }
@@ -937,6 +953,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.transport_type(),
             TransportHandle::Tcp(t) => t.transport_type(),
             TransportHandle::Tor(t) => t.transport_type(),
+            TransportHandle::Nostr(t) => t.transport_type(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.transport_type(),
         }
@@ -950,6 +967,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.state(),
             TransportHandle::Tcp(t) => t.state(),
             TransportHandle::Tor(t) => t.state(),
+            TransportHandle::Nostr(t) => t.state(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.state(),
         }
@@ -963,6 +981,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.mtu(),
             TransportHandle::Tcp(t) => t.mtu(),
             TransportHandle::Tor(t) => t.mtu(),
+            TransportHandle::Nostr(t) => t.mtu(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.mtu(),
         }
@@ -979,6 +998,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.link_mtu(addr),
             TransportHandle::Tcp(t) => t.link_mtu(addr),
             TransportHandle::Tor(t) => t.link_mtu(addr),
+            TransportHandle::Nostr(t) => t.link_mtu(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.link_mtu(addr),
         }
@@ -992,6 +1012,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(_) => None,
             TransportHandle::Tcp(t) => t.local_addr(),
             TransportHandle::Tor(_) => None,
+            TransportHandle::Nostr(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
         }
@@ -1005,6 +1026,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => Some(t.interface_name()),
             TransportHandle::Tcp(_) => None,
             TransportHandle::Tor(_) => None,
+            TransportHandle::Nostr(_) => None,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => None,
         }
@@ -1042,6 +1064,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.discover(),
             TransportHandle::Tcp(t) => t.discover(),
             TransportHandle::Tor(t) => t.discover(),
+            TransportHandle::Nostr(t) => t.discover(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.discover(),
         }
@@ -1055,6 +1078,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.auto_connect(),
             TransportHandle::Tcp(t) => t.auto_connect(),
             TransportHandle::Tor(t) => t.auto_connect(),
+            TransportHandle::Nostr(t) => t.auto_connect(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.auto_connect(),
         }
@@ -1068,6 +1092,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.accept_connections(),
             TransportHandle::Tcp(t) => t.accept_connections(),
             TransportHandle::Tor(t) => t.accept_connections(),
+            TransportHandle::Nostr(t) => t.accept_connections(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.accept_connections(),
         }
@@ -1087,6 +1112,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(_) => Ok(()), // connectionless
             TransportHandle::Tcp(t) => t.connect_async(addr).await,
             TransportHandle::Tor(t) => t.connect_async(addr).await,
+            TransportHandle::Nostr(_) => Ok(()), // connectionless
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connect_async(addr).await,
         }
@@ -1104,6 +1130,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(_) => ConnectionState::Connected,
             TransportHandle::Tcp(t) => t.connection_state_sync(addr),
             TransportHandle::Tor(t) => t.connection_state_sync(addr),
+            TransportHandle::Nostr(_) => ConnectionState::Connected,
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.connection_state_sync(addr),
         }
@@ -1120,6 +1147,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(t) => t.close_connection(addr),
             TransportHandle::Tcp(t) => t.close_connection_async(addr).await,
             TransportHandle::Tor(t) => t.close_connection_async(addr).await,
+            TransportHandle::Nostr(t) => t.close_connection(addr),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(t) => t.close_connection_async(addr).await,
         }
@@ -1142,6 +1170,7 @@ impl TransportHandle {
             TransportHandle::Ethernet(_) => TransportCongestion::default(),
             TransportHandle::Tcp(_) => TransportCongestion::default(),
             TransportHandle::Tor(_) => TransportCongestion::default(),
+            TransportHandle::Nostr(_) => TransportCongestion::default(),
             #[cfg(target_os = "linux")]
             TransportHandle::Ble(_) => TransportCongestion::default(),
         }
@@ -1175,6 +1204,9 @@ impl TransportHandle {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
             TransportHandle::Tor(t) => {
+                serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
+            }
+            TransportHandle::Nostr(t) => {
                 serde_json::to_value(t.stats().snapshot()).unwrap_or_default()
             }
             #[cfg(target_os = "linux")]
