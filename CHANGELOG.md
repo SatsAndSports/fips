@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+#### Packaging and Deployment
+
+- Arch Linux AUR packaging for `fips` (release) and `fips-git`
+  (development) packages with sysusers.d/tmpfiles.d integration
+  ([#21](https://github.com/jmcorgan/fips/pull/21),
+  [@dskvr](https://github.com/dskvr))
+
 ### Fixed
 
 - Control socket path detection in fipsctl and fipstop now checks for

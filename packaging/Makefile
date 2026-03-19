@@ -7,6 +7,7 @@
 #   make deb        Build a Debian/Ubuntu .deb package
 #   make tarball    Build a systemd install tarball
 #   make ipk        Build an OpenWrt .ipk package
+#   make aur        Build fips-git AUR package and validate with namcap
 #   make all        Build deb and tarball (default)
 #   make clean      Remove deploy/ directory
 
@@ -14,7 +15,7 @@ SHELL := /bin/bash
 PACKAGING_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 PROJECT_ROOT  := $(abspath $(PACKAGING_DIR)/..)
 
-.PHONY: all deb tarball ipk clean
+.PHONY: all deb tarball ipk aur clean
 
 all: deb tarball
 
@@ -26,6 +27,9 @@ tarball:
 
 ipk:
 	@bash $(PACKAGING_DIR)/openwrt/build-ipk.sh
+
+aur:
+	@bash $(PACKAGING_DIR)/aur/build-aur.sh
 
 clean:
 	rm -rf $(PROJECT_ROOT)/deploy
