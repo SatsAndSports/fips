@@ -49,6 +49,7 @@ services:
     hostname: {{ node.node_id }}
     volumes:
       - ./{{ node.node_id }}.yaml:/etc/fips/fips.yaml:ro
+      - {{ resolv_conf }}:/etc/resolv.conf:ro
     networks:
       fips-net:
         ipv4_address: {{ node.docker_ip }}
@@ -67,11 +68,18 @@ def generate_compose(
 
     nodes = [topology.nodes[nid] for nid in sorted(topology.nodes)]
 
+    # Absolute path to the shared resolv.conf (bind-mounted into containers
+    # so Docker's runtime resolv.conf generation doesn't overwrite it).
+    resolv_conf = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "docker", "resolv.conf")
+    )
+
     content = _COMPOSE_TEMPLATE.render(
         subnet=scenario.topology.subnet,
         rust_log=scenario.logging.rust_log,
         image=FIPS_SIM_IMAGE,
         nodes=nodes,
+        resolv_conf=resolv_conf,
     )
 
     path = os.path.join(output_dir, "docker-compose.yml")

@@ -39,11 +39,13 @@ class TrafficManager:
         config: TrafficConfig,
         rng: random.Random,
         down_nodes: set[str] | None = None,
+        npub_cache: dict[str, str] | None = None,
     ):
         self.topology = topology
         self.config = config
         self.rng = rng
         self.down_nodes = down_nodes or set()
+        self.npub_cache = npub_cache or {}
         self.active_sessions: list[TrafficSession] = []
         self.completed_results: list[dict] = []
 
@@ -66,7 +68,7 @@ class TrafficManager:
 
         # Pick random client and server (different nodes, both up)
         client, server = self.rng.sample(node_ids, 2)
-        server_npub = self.topology.nodes[server].npub
+        server_npub = self.npub_cache.get(server, self.topology.nodes[server].npub)
         container = self.topology.container_name(client)
 
         duration = int(

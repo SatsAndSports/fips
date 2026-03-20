@@ -1,21 +1,22 @@
-# Maelstrom: topology mutation + node churn + ephemeral identity
+# Maelstrom-sparse: sparse geometric topology for discovery stress testing
 #
-# Combines all chaos dimensions: netem impairments, link flaps, node
-# churn, AND peer-level topology mutation (connect/disconnect).
-# Half the nodes have ephemeral identities that change on restart.
+# Uses random geometric graph with low radius to produce sparse connectivity
+# (~3-4 peers per node), forcing multi-hop routing and heavy discovery usage.
+# The short coord cache TTL (10s) ensures transit-warmed entries expire
+# quickly, requiring rediscovery.
 #
-# Default: 20 nodes. Override with --nodes flag.
+# Default: 50 nodes. Override with --nodes flag.
 
 scenario:
-  name: "maelstrom"
+  name: "maelstrom-sparse"
   seed: 42
   duration_secs: 600
 
 topology:
-  num_nodes: 20
-  algorithm: erdos_renyi
+  num_nodes: 50
+  algorithm: random_geometric
   params:
-    p: 0.3
+    radius: 0.20
   ensure_connected: true
   subnet: "172.20.0.0/16"
   ip_start: 10
@@ -50,7 +51,7 @@ link_flaps:
 
 traffic:
   enabled: true
-  max_concurrent: 5
+  max_concurrent: 10
   interval_secs: { min: 5, max: 30 }
   duration_secs: { min: 5, max: 60 }
   parallel_streams: 4
@@ -58,7 +59,7 @@ traffic:
 node_churn:
   enabled: true
   interval_secs: { min: 60, max: 120 }
-  max_down_nodes: 3
+  max_down_nodes: 5
   down_duration_secs: { min: 30, max: 90 }
   protect_connectivity: false
 

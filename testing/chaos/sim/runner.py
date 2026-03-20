@@ -10,6 +10,7 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 from .compose import generate_compose
 from .config_gen import write_configs
@@ -34,7 +35,7 @@ class SimRunner:
         self.rng = random.Random(scenario.seed)
         self.topology: SimTopology | None = None
         self.compose_file: str | None = None
-        self.output_dir: str = scenario.logging.output_dir
+        self.output_dir: str = self._resolve_output_dir(scenario)
         self._interrupted = False
 
         # Shared set of currently-down node IDs (updated by NodeManager,
@@ -48,6 +49,20 @@ class SimRunner:
         self.traffic_mgr: TrafficManager | None = None
         self.node_mgr: NodeManager | None = None
         self.peer_churn_mgr: PeerChurnManager | None = None
+
+    @staticmethod
+    def _resolve_output_dir(scenario: Scenario) -> str:
+        """Build a timestamped output directory path.
+
+        Format: {base}/{scenario_name}-{YYYYMMDD-HHMMSS}/
+
+        The base path is determined by (in priority order):
+        1. FIPS_SIM_OUTPUT environment variable
+        2. The scenario YAML's logging.output_dir (default: ./sim-results)
+        """
+        base = os.environ.get("FIPS_SIM_OUTPUT", scenario.logging.output_dir)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return os.path.join(base, f"{timestamp}-{scenario.name}")
 
     def run(self) -> AnalysisResult | None:
         """Run the full simulation lifecycle."""
@@ -194,6 +209,10 @@ class SimRunner:
                 down_nodes=self._down_nodes,
                 ephemeral_nodes=self._ephemeral_nodes,
             )
+            # Share npub cache with traffic manager so iperf3 targets
+            # use runtime npubs (critical for ephemeral identity nodes).
+            if self.traffic_mgr:
+                self.traffic_mgr.npub_cache = self.peer_churn_mgr.npub_cache
 
     def _warmup(self):
         """Wait for mesh convergence."""

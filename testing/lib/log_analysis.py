@@ -47,6 +47,15 @@ class AnalysisResult:
     congestion_detected: list[tuple[str, str]] = field(default_factory=list)
     kernel_drop_events: list[tuple[str, str]] = field(default_factory=list)
     rekey_cutovers: list[tuple[str, str]] = field(default_factory=list)
+    discovery_initiated: list[tuple[str, str]] = field(default_factory=list)
+    discovery_succeeded: list[tuple[str, str]] = field(default_factory=list)
+    discovery_bloom_miss: list[tuple[str, str]] = field(default_factory=list)
+    discovery_backoff: list[tuple[str, str]] = field(default_factory=list)
+    discovery_dedup: list[tuple[str, str]] = field(default_factory=list)
+    discovery_timeout: list[tuple[str, str]] = field(default_factory=list)
+    discovery_retry: list[tuple[str, str]] = field(default_factory=list)
+    discovery_no_tree_peer: list[tuple[str, str]] = field(default_factory=list)
+    discovery_trigger: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         """Format a human-readable summary of the analysis."""
@@ -66,6 +75,17 @@ class AnalysisResult:
             f"Congestion events:     {len(self.congestion_detected)}",
             f"Kernel drop events:    {len(self.kernel_drop_events)}",
             f"Rekey cutovers:        {len(self.rekey_cutovers)}",
+            "",
+            "--- Discovery ---",
+            f"Triggers:              {len(self.discovery_trigger)}",
+            f"Initiated:             {len(self.discovery_initiated)}",
+            f"Succeeded:             {len(self.discovery_succeeded)}",
+            f"Retries:               {len(self.discovery_retry)}",
+            f"Bloom miss:            {len(self.discovery_bloom_miss)}",
+            f"Backoff suppressed:    {len(self.discovery_backoff)}",
+            f"Deduplicated:          {len(self.discovery_dedup)}",
+            f"No tree peer:          {len(self.discovery_no_tree_peer)}",
+            f"Timed out:             {len(self.discovery_timeout)}",
         ]
 
         if self.panics:
@@ -151,6 +171,25 @@ def _analyze_lines(result: AnalysisResult, source: str, log_text: str):
         # Rekey cutovers
         if "Rekey cutover complete" in line or "FSP rekey cutover complete" in line:
             result.rekey_cutovers.append((source, line))
+        # Discovery
+        if "Initiating LookupRequest" in line:
+            result.discovery_initiated.append((source, line))
+        if "proof verified, caching route" in line:
+            result.discovery_succeeded.append((source, line))
+        if "target not in any peer bloom filter" in line:
+            result.discovery_bloom_miss.append((source, line))
+        if "suppressed by backoff" in line:
+            result.discovery_backoff.append((source, line))
+        if "deduplicated, already pending" in line:
+            result.discovery_dedup.append((source, line))
+        if "lookup timed out" in line:
+            result.discovery_timeout.append((source, line))
+        if "Discovery retry sent" in line:
+            result.discovery_retry.append((source, line))
+        if "no tree peers with bloom match" in line:
+            result.discovery_no_tree_peer.append((source, line))
+        if "Failed to initiate session, trying discovery" in line:
+            result.discovery_trigger.append((source, line))
 
 
 def collect_docker_logs(containers: list[str]) -> dict[str, str]:
