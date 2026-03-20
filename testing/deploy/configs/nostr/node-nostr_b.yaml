@@ -1,7 +1,7 @@
 # FIPS Node nostr_b configuration (Nostr transport only)
 #
 # Identity: npub1cpva8uzr0tnrkfsdsycd5w0mfrt8dpqnrnndcesswyedzr0mmswsm5t064
-# Peers with nostr_a exclusively over Nostr relay.
+# Peers with nostr-a exclusively over Nostr relay.
 
 node:
   identity:
@@ -23,7 +23,7 @@ transports:
 
 peers:
   - npub: "npub137573nvtkwa3gumfzqlj8a27n45j2q6krlwrs92jlsa8lygyu4hq7rtfuk"
-    alias: "node-nostr_a"
+    alias: "node-nostr-a"
     addresses:
       - transport: nostr
         addr: "8fa9e8cd8bb3bb147369103f23f55e9d692503561fdc381552fc3a7f9104e56e"
