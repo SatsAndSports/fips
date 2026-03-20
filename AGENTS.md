@@ -1,13 +1,20 @@
 # FIPS Deploy — Multi-Node Mesh with Topology Collector
 
-All files described here live under `testing/deploy/`.
+Most deployment assets described here live under `testing/deploy/`.
+This document also references the Nostr transport implementation in
+`src/transport/nostr/` and transport config definitions in
+`src/config/transport.rs`.
 
 ## Overview
 
-A Docker-based deployment of a multi-node FIPS mesh network with a
-topology collector service. Nodes communicate over the FIPS mesh,
-report their spanning tree and peer state to a central collector,
-and the collected data can be visualized as a Graphviz SVG diagram.
+This repo includes a Docker-based FIPS deployment with:
+
+- a 5-node local UDP mesh,
+- a topology collector that stores raw reports in SQLite,
+- an external VPS peer reached through `node-a`, and
+- a 2-node Nostr test path where one node bridges into the UDP mesh.
+
+Collected reports can be rendered as a Graphviz topology diagram.
 
 ## Architecture
 
@@ -20,30 +27,31 @@ and the collected data can be visualized as a Graphviz SVG diagram.
              / | \          \
         node-b node-c collector (vanity npub: npub1mesh...)
                               \
-                         nostr_a (UDP + Nostr bridge)
+                         node-nostr-a (UDP + Nostr bridge)
                               |
                         ~~~relay~~~
                               |
-                         nostr_b (Nostr-only)
+                         node-nostr-b (Nostr-only)
 ```
 
-- 5 local containers on a Docker bridge network (172.20.0.0/24),
-  connected via UDP transport
-- 2 local containers (nostr_a, nostr_b) connected via Nostr ephemeral
-  events through an external relay — nostr_a also peers with node-a
-  over UDP, bridging nostr_b into the main mesh
-- 1 external VPS peer, connected through node-a
-- root85g6 wins tree root election via a ground node_addr (000016d3...)
-- The collector has a vanity npub starting with `npub1mesh`, ground
-  using the keytool. Its FIPS config uses a hardcoded nsec rather
-  than deterministic derivation.
-- All other node keys are derived deterministically from mesh name
-  "podman-test" and node name via `SHA-256("podman-test|<node-name>")`
+- 5 local containers on the Docker bridge network `172.20.0.0/24` use UDP transport
+- `node-nostr-a` peers with `node-a` over UDP and with `node-nostr-b` over Nostr
+- `node-nostr-b` is Nostr-only and reaches the main mesh through `node-nostr-a`
+- `node-a` is the gateway to the external VPS peer
+- `root85g6` wins root election via a ground `node_addr` (`000016d3...`)
+- the collector uses a ground, vanity `npub1mesh...` identity with a hand-written config
+- the checked-in Nostr configs are static and currently match the default mesh name `podman-test`
+
+If you run `testing/deploy/scripts/build.sh` with a different mesh name,
+regenerated UDP configs will change identities, but
+`testing/deploy/configs/nostr/` will not. Update those files too if you
+want the Nostr demo topology to remain consistent.
 
 ## Quick Start
 
 ```bash
 # Build binaries, generate configs, build Docker images
+# Use the default mesh name unless you also update testing/deploy/configs/nostr/
 testing/deploy/scripts/build.sh
 
 # Start the mesh
@@ -53,68 +61,77 @@ docker compose -f testing/deploy/docker-compose.yml up -d
 docker exec fips-node-a fipsctl show peers
 ```
 
-## Directory Structure (`testing/deploy/`)
+## Directory Structure
 
 ### Container setup
 
-- `Dockerfile` — Debian slim image with FIPS binaries, dnsmasq, curl, python3
-- `docker-compose.yml` — 7 services (root, a, b, c, collector, nostr-a, nostr-b) with TUN/NET_ADMIN
-- `.dockerignore` — Limits build context to the 3 FIPS binaries only
-- `resolv.conf` — Routes DNS through dnsmasq -> FIPS DNS responder
+- `testing/deploy/Dockerfile` — Debian slim image with FIPS binaries, dnsmasq, curl, python3
+- `testing/deploy/docker-compose.yml` — 7 services with TUN and `NET_ADMIN`
+- `testing/deploy/.dockerignore` — limits the build context to the FIPS binaries
+- `testing/deploy/resolv.conf` — routes DNS through dnsmasq -> FIPS DNS responder
 
 ### Topology and config generation
 
-- `configs/topologies/podman-mesh.yaml` — Topology definition (nodes, peers, IPs)
-- `configs/node.template.yaml` — Symlink to shared config template
-- `configs/nostr/` — Hand-written configs for the Nostr-only test nodes
-- `scripts/generate-configs.sh` — Symlink to shared config generator
-- `scripts/derive-keys.py` — Symlink to shared key derivation script
-- `scripts/build.sh` — Compiles FIPS (musl, static), generates configs, builds images
+- `testing/deploy/configs/topologies/podman-mesh.yaml` — UDP mesh topology plus the `nostr_a` bridge node
+- `testing/deploy/configs/node.template.yaml` — shared YAML template (symlink into `testing/static/`)
+- `testing/deploy/configs/nostr/` — hand-written configs for the Nostr bridge node and Nostr-only node
+- `testing/deploy/scripts/generate-configs.sh` — shared config generator (symlink into `testing/static/`)
+- `testing/deploy/scripts/derive-keys.py` — shared key derivation helper (symlink into `testing/static/`)
+- `testing/deploy/scripts/build.sh` — compiles musl binaries, regenerates configs, builds Docker images
 
 ### Collector service
 
-- `collector/server.py` — HTTP server (Python stdlib) that stores reports in SQLite
-- `collector/push.sh` — Client script: gathers fipsctl output and POSTs to collector
-- `collector/entrypoint.sh` — Container entrypoint: starts dnsmasq + collector + fips
-- `collector/visualize.py` — Reads SQLite, generates Graphviz DOT, outputs SVG
+- `testing/deploy/collector/server.py` — HTTP server that stores raw report bodies in SQLite
+- `testing/deploy/collector/push.sh` — client script that gathers `fipsctl` output and POSTs it back
+- `testing/deploy/collector/entrypoint.sh` — collector container entrypoint
+- `testing/deploy/collector/visualize.py` — merges reports and emits DOT or SVG topology output
+
+### Nostr transport source
+
+- `src/transport/nostr/mod.rs` — `NostrTransport`, relay tasks, reconnect logic, stats, tests
+- `src/transport/nostr/event.rs` — NIP-01 event building/signing and relay message parsing
+- `src/config/transport.rs` — `NostrConfig` and transport config integration
 
 ### Key tools
 
-- `tools/keytool/` — Standalone Rust tool for key derivation and grinding
-  - `cargo run -- show` — Derive and display keys for current mesh nodes
-  - `cargo run -- grind-root` — Grind node names for smallest node_addr (tree root)
-  - `cargo run -- grind-vanity [prefix]` — Grind random keypairs for vanity npub prefix
+- `tools/keytool/` — standalone Rust tool for derivation and grinding
+  - `cargo run -- show` — derive and display keys for current mesh nodes
+  - `cargo run -- grind-root` — grind node names for the smallest `node_addr`
+  - `cargo run -- grind-vanity [prefix]` — grind random keypairs for a vanity `npub` prefix
 
-### Generated (gitignored)
+### Generated / local artifacts
 
-- `generated-configs/` — FIPS YAML configs, regenerated by scripts
-- `data/` — Persistent SQLite database and generated SVG diagrams
-- `fips`, `fipsctl`, `fipstop` — Compiled binaries copied into build context
+- `testing/deploy/generated-configs/` — regenerated FIPS YAML configs
+- `testing/deploy/data/` — collector SQLite database and rendered diagrams
+- `testing/deploy/fips`, `testing/deploy/fipsctl`, `testing/deploy/fipstop` — copied build outputs
 - `tools/keytool/target/` — Rust build artifacts
 
 ## Collector
 
-The collector is a FIPS node that also runs an HTTP server on port 80.
-Any FIPS node can push reports to it over the mesh.
+The collector is a FIPS node that also runs an HTTP service on port 80.
+Any node that can route to the collector can submit a report.
 
 ### Endpoints
 
-- `GET /` — Serves the `push.sh` script (for `curl | bash` usage)
-- `POST /report` — Store a JSON report (status + tree + peers)
-- `GET /reports` — List recent reports (last 100, newest first)
-- `GET /health` — Liveness check
+- `GET /` — serves `push.sh` for `curl | bash` usage
+- `POST /report` — stores the request body verbatim in SQLite
+- `GET /reports` — returns recent report metadata only (`id`, `received_at`)
+- `GET /health` — liveness check
+
+There is currently no schema validation, deduplication, or authentication
+layer in the collector; it stores raw POST bodies as-is.
 
 ### Pushing a report
 
-The simplest way to push a report from any FIPS node:
+The simplest mesh-native report submission flow is:
 
 ```bash
 curl -6 -s http://npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt.fips | bash
 ```
 
-This fetches the `push.sh` script from the collector over the mesh and
-executes it. The script gathers `fipsctl show status/tree/peers` output
-and POSTs it back to the collector.
+That fetches `push.sh` from the collector over FIPS, gathers
+`fipsctl show status/tree/peers`, and POSTs the combined JSON back to
+the collector.
 
 From inside a container:
 
@@ -125,58 +142,65 @@ docker exec fips-node-a bash -c \
 
 ### Generating a topology diagram
 
-Requires graphviz (`apt install graphviz`).
+`visualize.py` always generates DOT. If Graphviz `dot` is available, it
+renders SVG; `--dot` forces DOT output.
 
 ```bash
 python3 testing/deploy/collector/visualize.py testing/deploy/data/collector.db > mesh.svg
+python3 testing/deploy/collector/visualize.py testing/deploy/data/collector.db --dot > mesh.dot
 ```
 
-The SVG shows:
+The diagram currently shows:
 
-- **Black solid arrows** — Current spanning tree edges (parent -> child)
-- **Orange solid arrows** — Historical tree edges (were tree edges in past reports)
-- **Gray dashed lines** — Non-tree peer links
-- **Bold border** — Tree root node
-- **Dotted border** — Nodes that never submitted a report (appear in others' peer data)
+- black solid arrows — current spanning-tree edges
+- orange solid arrows — historical tree edges that are no longer current
+- gray dashed lines — non-tree links
+- bold node border — current root
+- dotted node border — nodes that never submitted a report
+- edge labels — RTT and transport type when known
 
-Node labels include display name (peer-assigned alias), truncated npub,
-truncated node_addr, and tree depth.
+Node labels include display name, truncated `npub`, truncated `node_addr`,
+and tree depth.
 
 ## Nostr Transport
 
-FIPS supports a Nostr relay transport (`src/transport/nostr/`) that
-sends and receives packets as ephemeral Nostr events through WebSocket
-relays. This allows FIPS nodes to peer over any Nostr relay
-infrastructure.
+FIPS supports a Nostr relay transport that wraps FIPS packets in
+ephemeral Nostr events (`kind=21210`) and exchanges them through one or
+more WebSocket relays.
 
 ### How it works
 
-- Packets are Base64-encoded into the `content` field of a signed
-  Nostr event (kind 21210, ephemeral)
-- Recipients are addressed via `["p", "<hex_pubkey>"]` tags
-- Each node subscribes to events tagged with its own pubkey
-- The node's FIPS identity keypair (nsec) is reused for signing events
-- Multiple relays can be configured; outbound events are broadcast to
-  all, inbound events are received from any
+- packet payloads are Base64-encoded into the event `content`
+- recipients are addressed via `p` tags containing raw hex x-only pubkeys
+- the node's FIPS identity keypair is reused to sign outgoing events
+- each configured relay runs in its own async task
+- outbound events are broadcast to all configured relays
+- relay tasks reconnect with exponential backoff
+- per-transport stats track publishes, receives, bytes, relay connects/disconnects, and decode errors
 
-### Source files
-
-- `src/transport/nostr/mod.rs` — `NostrTransport` struct, relay
-  connection management (broadcast channel architecture), stats
-- `src/transport/nostr/event.rs` — NIP-01 event building/signing,
-  relay message parsing (EVENT, NOTICE, OK, EOSE)
-- `src/config/transport.rs` — `NostrConfig` (relays, kind, mtu)
+Current implementation note: inbound relay messages are minimally parsed
+and routed; the transport relies on relay subscription filtering and the
+higher FIPS layer for trust/authentication, rather than enforcing full
+local Nostr event verification.
 
 ### Config format
+
+Single instance:
 
 ```yaml
 transports:
   nostr:
     relays:
       - "ws://relay.example.com:7777"
-    # kind: 21210   # optional, default
-    # mtu: 1280     # optional, default (IPv6 minimum)
+    # kind: 21210
+    # mtu: 1280
+```
 
+Like other transports, named Nostr instances are also supported.
+
+Peer addressing:
+
+```yaml
 peers:
   - npub: "npub1..."
     alias: "my-peer"
@@ -186,89 +210,97 @@ peers:
     connect_policy: auto_connect
 ```
 
-The `addr` field is the peer's hex-encoded x-only public key (the raw
-form of their npub). This is used in the `["p", ...]` event tag for
-addressing.
+The `addr` field is the peer's hex-encoded x-only public key, i.e. the
+raw form behind the peer's `npub`.
 
 ### Running the tests
 
 ```bash
-# Unit tests only (no relay needed)
+# Unit tests only
 cargo test --lib transport::nostr
 
-# All tests including relay integration (requires ws://127.0.0.1:7777)
+# Unit + relay integration tests (requires ws://127.0.0.1:7777)
 cargo test --lib transport::nostr -- --include-ignored
 ```
 
-The integration tests (`test_send_recv_via_relay`, `test_bidirectional_via_relay`)
-require a Nostr relay running at `ws://127.0.0.1:7777`. They are gated
-with `#[ignore]` so they don't run in CI.
+The ignored tests are:
 
-### Docker test nodes
+- `test_send_recv_via_relay`
+- `test_bidirectional_via_relay`
 
-Two Nostr-enabled nodes are included in the Docker deployment:
+They require a reachable local relay at `ws://127.0.0.1:7777`.
 
-- `node-nostr-a` (172.20.0.20) — peers with nostr_b over Nostr relay,
-  and with node-a over UDP (bridges Nostr into the main mesh)
-- `node-nostr-b` (172.20.0.21) — peers with nostr_a over Nostr relay
-  only (Nostr-only node, reaches UDP mesh via nostr_a)
+## Docker Nostr nodes
 
-Their hand-written configs live in `testing/deploy/configs/nostr/`.
-The `nostr_a` node also appears in the topology file
-(`configs/topologies/podman-mesh.yaml`) so that the config generator
-includes it as a UDP peer in node-a's generated config.
+Two Nostr-enabled nodes are included in the deployment:
 
-The relay URL is configured in their YAML configs. Update the `relays:`
-field to point to an accessible Nostr relay that accepts kind 21210
-events.
+- `node-nostr-a` (`172.20.0.20`) — UDP + Nostr bridge node
+- `node-nostr-b` (`172.20.0.21`) — Nostr-only node that reaches the mesh through `node-nostr-a`
+
+Their checked-in configs live in `testing/deploy/configs/nostr/` and
+are mounted directly by Compose. Those files should be kept in git.
+
+The checked-in configs currently point at `ws://80.78.18.182:7777`.
+If that relay changes or a different environment is used, update the
+`relays:` field in those files.
+
+`nostr_a` also appears in `testing/deploy/configs/topologies/podman-mesh.yaml`
+so the generator adds it as a UDP peer in `node-a`'s generated config.
 
 ```bash
-# Start just the Nostr test nodes
+# Start just the Nostr nodes
 docker compose -f testing/deploy/docker-compose.yml up -d node-nostr-a node-nostr-b
 
-# Check peers
+# Check the bridge node: it should see node-a (udp) and node-nostr-b (nostr)
 docker exec fips-node-nostr-a fipsctl show peers
 
-# Ping through the mesh via Nostr relay
+# Pure Nostr path
 docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
 
-# Ping between Nostr-only nodes (via relay)
-docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
+# Cross-transport path into the UDP mesh
+docker exec fips-node-nostr-b ping6 -c3 node-a.fips
 
-# Check logs
+# Logs
 docker logs fips-node-nostr-a
+docker logs fips-node-nostr-b
 ```
 
 ## Useful Commands
 
 ```bash
-# Check peers / tree / links on any node
+# Core state
 docker exec fips-node-a fipsctl show peers
 docker exec fips-node-a fipsctl show tree
 docker exec fips-node-a fipsctl show links
+docker exec fips-node-a fipsctl show status
 
-# Ping between nodes through the mesh
+# Mesh pings
 docker exec fips-node-b ping6 -c3 node-a.fips
 docker exec fips-node-b ping6 -c3 vps.fips
 
-# Ping between Nostr-only nodes (via relay)
+# Nostr tests
 docker exec fips-node-nostr-a ping6 -c3 node-nostr-b.fips
-
-# Ping from Nostr-only node to UDP mesh (cross-transport routing)
 docker exec fips-node-nostr-b ping6 -c3 node-a.fips
 
-# Interactive TUI dashboard
+# TUI
 docker exec -it fips-node-a fipstop
 
 # Bandwidth test
 docker exec -d fips-node-a iperf3 -s
 docker exec fips-node-b iperf3 -6 -c node-a.fips -t 5
 
-# Push reports from all UDP nodes then regenerate the diagram
-for node in fips-node-a fips-node-b fips-node-c fips-node-root fips-node-collector; do
-  docker exec $node bash -c "
-    curl -6 -s http://node-collector.fips | bash
-  "
+# Push reports from all current containers, then regenerate the diagram
+for node in \
+  fips-node-root \
+  fips-node-a \
+  fips-node-b \
+  fips-node-c \
+  fips-node-collector \
+  fips-node-nostr-a \
+  fips-node-nostr-b
+do
+  docker exec "$node" bash -c \
+    "curl -6 -s http://npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt.fips | bash"
 done
 python3 testing/deploy/collector/visualize.py testing/deploy/data/collector.db > mesh.svg
 
