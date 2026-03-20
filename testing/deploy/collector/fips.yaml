@@ -1,0 +1,54 @@
+# FIPS Collector node configuration (vanity npub, hand-edited)
+#
+# Identity: npub1meshz5gqcvzkrjnvce7wty8zdwq9lyag5u9yqfvh0uzg4qca0g5s0h7wmt
+# node_addr: 64d3872385442d36eec0cb1966969431
+
+node:
+  identity:
+    nsec: "49b4a084692de280a12597e9eb54cc9a6312783df203e893cc409e27c2bbf3a7"
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+    mtu: 1472
+    # recv_buf_size: 2097152   # 2 MB (default)
+    # send_buf_size: 2097152   # 2 MB (default)
+    # Note: The kernel clamps socket buffers to net.core.rmem_max / wmem_max.
+    # Ensure these sysctls are >= the configured buffer sizes:
+    #   sysctl -w net.core.rmem_max=2097152
+    #   sysctl -w net.core.wmem_max=2097152
+
+peers:
+  - npub: "npub198t8r6n20q9834n57j9f9u6dwh8hx375dc5xjs8nvn2632c9wexqtsu6xp"
+    alias: "node-root85g6"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.13:2121"
+    connect_policy: auto_connect
+  - npub: "npub1zr9mm7pd2shj2tynga4ck0h3ssefkahyhfggd2scmdgn4sktm2rsec6qm2"
+    alias: "node-a"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.10:2121"
+    connect_policy: auto_connect
+  - npub: "npub19g0a3qr299rpwum5av2vewzp7zqrj367u9scwj3daqq6y54dpvhqngen0s"
+    alias: "node-b"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.11:2121"
+    connect_policy: auto_connect
+  - npub: "npub1a46clg3ur7a04yt0gm6jrm2ce4uafxe8e8fz7fzyeec4uyt9hf0qhm52ec"
+    alias: "node-c"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.12:2121"
+    connect_policy: auto_connect

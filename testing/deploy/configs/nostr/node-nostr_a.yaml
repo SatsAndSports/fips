@@ -1,0 +1,39 @@
+# FIPS Node nostr_a configuration (Nostr + UDP bridge)
+#
+# Identity: npub137573nvtkwa3gumfzqlj8a27n45j2q6krlwrs92jlsa8lygyu4hq7rtfuk
+# Peers with nostr-b over Nostr relay, and with node-a over UDP.
+# Bridges the Nostr-only nostr-b into the main UDP mesh.
+
+node:
+  identity:
+    nsec: "9db86b27082a288f0313a8b582b33ee50efee28388a88ea1529fea7dc4f95350"
+
+tun:
+  enabled: true
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: true
+  bind_addr: "127.0.0.1"
+
+transports:
+  nostr:
+    relays:
+      - "ws://80.78.18.182:7777"
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+peers:
+  - npub: "npub1cpva8uzr0tnrkfsdsycd5w0mfrt8dpqnrnndcesswyedzr0mmswsm5t064"
+    alias: "node-nostr-b"
+    addresses:
+      - transport: nostr
+        addr: "c059d3f0437ae63b260d8130da39fb48d67684131ce6dc66107132d10dfbdc1d"
+    connect_policy: auto_connect
+  - npub: "npub1zr9mm7pd2shj2tynga4ck0h3ssefkahyhfggd2scmdgn4sktm2rsec6qm2"
+    alias: "node-a"
+    addresses:
+      - transport: udp
+        addr: "172.20.0.10:2121"
+    connect_policy: auto_connect

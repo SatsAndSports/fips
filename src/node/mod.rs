@@ -31,6 +31,7 @@ use crate::transport::{
 use crate::transport::udp::UdpTransport;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tor::TorTransport;
+use crate::transport::nostr::NostrTransport;
 #[cfg(target_os = "linux")]
 use crate::transport::ethernet::EthernetTransport;
 use crate::tree::TreeState;
@@ -718,6 +719,23 @@ impl Node {
             let transport_id = self.allocate_transport_id();
             let tor = TorTransport::new(transport_id, name, tor_config, packet_tx.clone());
             transports.push(TransportHandle::Tor(tor));
+        }
+
+        // Create Nostr transport instances
+        let nostr_instances: Vec<_> = self
+            .config
+            .transports
+            .nostr
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        let keypair = self.identity.keypair();
+        for (name, nostr_config) in nostr_instances {
+            let transport_id = self.allocate_transport_id();
+            let mut nostr = NostrTransport::new(transport_id, name, nostr_config, packet_tx.clone());
+            nostr.set_keypair(keypair);
+            transports.push(TransportHandle::Nostr(nostr));
         }
 
         transports

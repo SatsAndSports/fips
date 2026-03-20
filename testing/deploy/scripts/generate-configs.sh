@@ -1,0 +1,1 @@
+../../static/scripts/generate-configs.sh

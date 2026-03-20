@@ -14,7 +14,7 @@
 # Claude Code
 .claude/
 
-deploy/
+/deploy/
 vps.env
 
 reference/

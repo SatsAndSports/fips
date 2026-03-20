@@ -101,10 +101,11 @@ generate_peer_block() {
     local peer_ip=$(get_node_attr "$topology_file" "$peer_id" "address")
     local transport=$(get_default_transport "$topology_file")
     local port=$(transport_port "$transport")
+    local peer_alias="node-$(echo "$peer_id" | tr '_' '-')"
 
     cat <<EOF
   - npub: "$peer_npub"
-    alias: "node-$peer_id"
+    alias: "$peer_alias"
     addresses:
       - transport: $transport
         addr: "$peer_ip:$port"
