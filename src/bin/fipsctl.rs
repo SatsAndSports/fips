@@ -113,8 +113,10 @@ impl ShowCommands {
 ///
 /// Checks the system-wide path first (used when the daemon runs as a
 /// systemd service), then falls back to the user's XDG runtime directory.
+/// Uses directory existence rather than socket file existence so the check
+/// works even when the user lacks traverse permission on /run/fips/ (0750).
 fn default_socket_path() -> PathBuf {
-    if Path::new("/run/fips/control.sock").exists() {
+    if Path::new("/run/fips").exists() {
         PathBuf::from("/run/fips/control.sock")
     } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         PathBuf::from(format!("{runtime_dir}/fips/control.sock"))

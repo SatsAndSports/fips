@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Control socket path detection in fipsctl and fipstop now checks for
+  the `/run/fips/` directory instead of the socket file inside it, so
+  users not yet in the `fips` group get a clear "Permission denied"
+  error instead of a misleading "No such file" fallback to
+  `$XDG_RUNTIME_DIR` ([#30](https://github.com/jmcorgan/fips/issues/30),
+  reported by [@Sebastix](https://github.com/Sebastix))
+
 ## [0.2.0] - 2026-03-22
 
 ### Added
