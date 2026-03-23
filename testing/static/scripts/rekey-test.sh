@@ -58,7 +58,7 @@ fi
 trap 'echo ""; echo "Test interrupted"; exit 130' INT
 
 # Wait times derived from rekey timer
-CONVERGE_WAIT=5
+CONVERGE_WAIT=15
 FIRST_REKEY_WAIT=40    # > REKEY_AFTER_SECS, allow margin
 REKEY_SETTLE=5         # settle time after rekey for cutover to complete
 SECOND_REKEY_WAIT=40   # wait for second cycle
