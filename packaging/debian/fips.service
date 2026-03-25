@@ -9,9 +9,6 @@ ExecStart=/usr/bin/fips --config /etc/fips/fips.yaml
 Restart=on-failure
 RestartSec=5
 
-# Logging: RUST_LOG controls verbosity.
-Environment=RUST_LOG=info
-
 # Control socket directory (/run/fips/).
 # Group-accessible so 'fips' group members can use fipsctl/fipstop.
 RuntimeDirectory=fips

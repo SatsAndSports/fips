@@ -7,7 +7,7 @@ use fips::config::{resolve_identity, IdentitySource};
 use fips::version;
 use fips::{Config, Node};
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 /// FIPS mesh network daemon
@@ -26,9 +26,32 @@ struct Args {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // Initialize logging
+    let args = Args::parse();
+
+    // Load configuration before initializing logging so we can use
+    // the config's log_level as the tracing filter default.
+    let (config, loaded_paths) = if let Some(config_path) = &args.config {
+        match Config::load_file(config_path) {
+            Ok(config) => (config, vec![config_path.clone()]),
+            Err(e) => {
+                eprintln!("Failed to load configuration from {}: {}", config_path.display(), e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        match Config::load() {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("Failed to load configuration: {}", e);
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Initialize logging: RUST_LOG env var overrides config if set
+    let log_level = config.node.log_level();
     let filter = EnvFilter::builder()
-        .with_default_directive(Level::INFO.into())
+        .with_default_directive(log_level.into())
         .from_env_lossy();
 
     fmt()
@@ -36,31 +59,7 @@ async fn main() {
         .with_target(true)
         .init();
 
-    let args = Args::parse();
-
     info!("FIPS {} starting", version::short_version());
-
-    // Load configuration
-    debug!("Loading configuration");
-    let (config, loaded_paths) = if let Some(config_path) = &args.config {
-        // Explicit config file specified - load only that file
-        match Config::load_file(config_path) {
-            Ok(config) => (config, vec![config_path.clone()]),
-            Err(e) => {
-                error!("Failed to load configuration from {}: {}", config_path.display(), e);
-                std::process::exit(1);
-            }
-        }
-    } else {
-        // Use default search paths
-        match Config::load() {
-            Ok(result) => result,
-            Err(e) => {
-                error!("Failed to load configuration: {}", e);
-                std::process::exit(1);
-            }
-        }
-    };
 
     if loaded_paths.is_empty() {
         info!("No config files found, using defaults");

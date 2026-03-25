@@ -14,7 +14,6 @@ start_service() {
 
 	procd_open_instance
 	procd_set_param command "$PROG" --config "$CONFIG"
-	procd_set_param env RUST_LOG=info
 	# Respawn: restart after 5 s, give up after 5 consecutive failures within
 	# a 3600 s window, then reset the failure counter and try again.
 	procd_set_param respawn 3600 5 5

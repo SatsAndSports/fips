@@ -612,6 +612,11 @@ pub struct NodeConfig {
     /// Rekey / session rekeying (`node.rekey.*`).
     #[serde(default)]
     pub rekey: RekeyConfig,
+
+    /// Log level (`node.log_level`). Case-insensitive.
+    /// Valid values: trace, debug, info, warn, error. Default: info.
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 impl Default for NodeConfig {
@@ -637,11 +642,23 @@ impl Default for NodeConfig {
             session_mmp: SessionMmpConfig::default(),
             ecn: EcnConfig::default(),
             rekey: RekeyConfig::default(),
+            log_level: None,
         }
     }
 }
 
 impl NodeConfig {
+    /// Get the log level as a tracing Level. Default: INFO.
+    pub fn log_level(&self) -> tracing::Level {
+        match self.log_level.as_deref().map(|s| s.to_lowercase()).as_deref() {
+            Some("trace") => tracing::Level::TRACE,
+            Some("debug") => tracing::Level::DEBUG,
+            Some("warn") | Some("warning") => tracing::Level::WARN,
+            Some("error") => tracing::Level::ERROR,
+            _ => tracing::Level::INFO,
+        }
+    }
+
     fn default_tick_interval_secs() -> u64 { 1 }
     fn default_base_rtt_ms() -> u64 { 100 }
     fn default_heartbeat_interval_secs() -> u64 { 10 }
