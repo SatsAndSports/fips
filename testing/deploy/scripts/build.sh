@@ -31,6 +31,7 @@ echo ""
 # ── Step 1: Compile FIPS ────────────────────────────────────────────
 UNAME_S=$(uname -s)
 CARGO_TARGET="x86_64-unknown-linux-musl"
+CARGO_FEATURE_ARGS=(--no-default-features --features tui)
 
 # Ensure musl target is installed (static linking — no glibc dependency)
 if ! rustup target list --installed | grep -q "$CARGO_TARGET"; then
@@ -48,12 +49,14 @@ if [ "$UNAME_S" = "Darwin" ]; then
 
     echo "Building FIPS (release, musl, cross-compile)..."
     cargo zigbuild --release --target "$CARGO_TARGET" \
+        "${CARGO_FEATURE_ARGS[@]}" \
         --manifest-path="$PROJECT_ROOT/Cargo.toml"
 else
     echo "Building FIPS (release, musl)..."
     # Use system gcc for C dependencies (secp256k1-sys) when musl-gcc
     # is not installed. The Rust linker handles musl linking regardless.
     CC="${CC:-gcc}" cargo build --release --target "$CARGO_TARGET" \
+        "${CARGO_FEATURE_ARGS[@]}" \
         --manifest-path="$PROJECT_ROOT/Cargo.toml"
 fi
 
