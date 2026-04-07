@@ -93,6 +93,8 @@ pub struct ServiceAdvertisement {
     pub peer_pubkey: PublicKey,
     /// STUN servers advertised by the responder.
     pub stun_servers: Vec<String>,
+    /// Signed Nostr creation timestamp.
+    pub created_at: Timestamp,
     /// The Nostr event ID of the advertisement.
     pub event_id: EventId,
 }
@@ -139,10 +141,7 @@ pub async fn discover_service(
     client: &RelayClient,
     responder_pubkey: &PublicKey,
 ) -> Result<Option<Event>, NostrError> {
-    let filter = Filter::new()
-        .kind(Kind::Custom(SERVICE_AD_KIND))
-        .author(*responder_pubkey)
-        .identifier(FIPS_SERVICE_TAG);
+    let filter = service_advertisement_filter().author(*responder_pubkey);
 
     debug!("discovering service for {responder_pubkey}");
 
@@ -166,6 +165,13 @@ pub async fn discover_service(
     }
 
     Ok(event)
+}
+
+/// Build the base filter for FIPS responder advertisements.
+pub fn service_advertisement_filter() -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(SERVICE_AD_KIND))
+        .identifier(FIPS_SERVICE_TAG)
 }
 
 /// Discover a responder service advertisement and parse it into a typed struct.
@@ -336,6 +342,7 @@ pub fn parse_service_advertisement(event: &Event) -> Result<ServiceAdvertisement
     Ok(ServiceAdvertisement {
         peer_pubkey: event.pubkey,
         stun_servers: extract_stun_servers(event),
+        created_at: event.created_at,
         event_id: event.id,
     })
 }

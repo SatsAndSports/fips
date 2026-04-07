@@ -694,6 +694,26 @@ impl Node {
             transports.push(TransportHandle::Udp(udp));
         }
 
+        // Create UDP hole-punch transport instances
+        let udp_holepunch_instances: Vec<_> = self
+            .config
+            .transports
+            .udp_holepunch
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        for (name, udp_holepunch_config) in udp_holepunch_instances {
+            let transport_id = self.allocate_transport_id();
+            let transport = crate::transport::udp_holepunch::UdpHolePunchTransport::new(
+                transport_id,
+                name,
+                udp_holepunch_config,
+                packet_tx.clone(),
+            );
+            transports.push(TransportHandle::UdpHolePunch(transport));
+        }
+
         // Create Ethernet transport instances
         #[cfg(target_os = "linux")]
         {
