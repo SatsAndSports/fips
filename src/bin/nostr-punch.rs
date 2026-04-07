@@ -1,4 +1,4 @@
-//! fips-punch - demo UDP hole punch over Nostr signaling.
+//! nostr-punch - demo UDP hole punch over Nostr signaling.
 //!
 //! This binary is intended for real-world manual testing across two machines.
 //! It uses a real Nostr relay and STUN server, prints the responder's npub,
@@ -28,7 +28,7 @@ const STUN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Demo UDP hole punch over Nostr signaling.
 #[derive(Parser, Debug)]
 #[command(
-    name = "fips-punch",
+    name = "nostr-punch",
     version = version::short_version(),
     long_version = version::long_version(),
     about = "Demo UDP hole punch over Nostr signaling"
@@ -124,7 +124,7 @@ async fn run(args: Args) -> Result<(), String> {
         .to_bech32()
         .map_err(|e| format!("failed to encode npub: {e}"))?;
 
-    info!(role = args.role.as_str(), "starting fips-punch");
+    info!(role = args.role.as_str(), "starting nostr-punch");
     info!("local identity: {npub}");
     if ephemeral {
         info!("using ephemeral keypair; pass --secret-key to reuse an identity");

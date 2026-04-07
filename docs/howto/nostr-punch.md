@@ -1,6 +1,6 @@
-# fips-punch
+# nostr-punch
 
-`fips-punch` is a small demo binary that performs UDP hole punching using:
+`nostr-punch` is a small demo binary that performs UDP hole punching using:
 
 - Nostr relays for signaling
 - STUN for reflexive address discovery
@@ -14,13 +14,13 @@ you can verify that direct communication worked.
 Build just the demo binary:
 
 ```bash
-cargo build --release --no-default-features --bin fips-punch
+cargo build --release --no-default-features --bin nostr-punch
 ```
 
 The resulting binary is:
 
 ```bash
-target/release/fips-punch
+target/release/nostr-punch
 ```
 
 Copy that same binary to both machines.
@@ -32,7 +32,7 @@ Copy that same binary to both machines.
 Run the responder first:
 
 ```bash
-./fips-punch \
+./nostr-punch \
   --role responder \
   --relay wss://relay.damus.io \
   --stun stun.l.google.com:19302
@@ -55,7 +55,7 @@ successful session.
 Run the initiator on the other machine:
 
 ```bash
-./fips-punch \
+./nostr-punch \
   --role initiator \
   --relay wss://relay.damus.io \
   --responder-npub npub1... \
@@ -85,7 +85,7 @@ On success, both sides should log:
 
 ## Identity Behavior
 
-If `--secret-key` is omitted, `fips-punch` generates a random ephemeral Nostr
+If `--secret-key` is omitted, `nostr-punch` generates a random ephemeral Nostr
 keypair for that run.
 
 This is convenient for testing, but it means:
@@ -103,7 +103,7 @@ If you want a stable identity across runs, pass `--secret-key` as either:
 You can provide multiple relays:
 
 ```bash
-./fips-punch \
+./nostr-punch \
   --role initiator \
   --relay wss://relay.damus.io \
   --relay wss://nos.lol \
