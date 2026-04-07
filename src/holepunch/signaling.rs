@@ -204,6 +204,19 @@ pub fn parse_signaling_event(event: &Event) -> Result<SignalingPayload, NostrErr
         .map_err(|e| NostrError::InvalidEvent(format!("invalid signaling payload: {e}")))
 }
 
+/// Extract STUN server addresses from a service advertisement event.
+///
+/// Returns the values of all `stun` tags in the event. The initiator
+/// picks one to query for its reflexive address.
+pub fn extract_stun_servers(event: &Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter(|t| t.kind() == TagKind::custom("stun"))
+        .filter_map(|t| t.content().map(|s| s.to_string()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

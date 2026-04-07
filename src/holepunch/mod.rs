@@ -14,6 +14,9 @@
 pub mod punch;
 pub mod signaling;
 
+#[cfg(test)]
+mod tests;
+
 use std::time::Duration;
 
 /// Errors that can occur during hole punching.
