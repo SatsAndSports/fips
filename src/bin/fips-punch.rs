@@ -11,7 +11,7 @@ use fips::holepunch::signaling::{
     publish_service_advertisement, send_answer_all, send_offer_all, subscribe_signals,
 };
 use fips::nostr_relay::{RelayClient, Subscription};
-use fips::stun::stun_query;
+use fips::stun::stun_query_any;
 use fips::version;
 use futures::future::join_all;
 use nostr::prelude::*;
@@ -22,6 +22,8 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
+
+const STUN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Demo UDP hole punch over Nostr signaling.
 #[derive(Parser, Debug)]
@@ -233,6 +235,9 @@ async fn run_responder(
     loop {
         match handle_responder_session(args, keys, relays, &socket, &mut subs).await {
             Ok(()) => info!("responder ready for another connection"),
+            Err(e) if e == "all relay subscriptions closed" => {
+                return Err("all relay subscriptions closed; restart the responder or add reconnect logic".into())
+            }
             Err(e) => warn!(error = %e, "responder session failed; continuing to listen"),
         }
     }
@@ -253,17 +258,16 @@ async fn handle_responder_session(
     }
     info!(session_id = %offer.session_id, from = %offer.reflexive_addr, "received offer");
 
-    let reflexive = stun_query(socket, &offer.stun_server)
-        .await
-        .map_err(|e| format!("STUN query failed: {e}"))?;
-    info!(reflexive = %reflexive, stun = %offer.stun_server, "STUN reflexive address");
+    let stun_servers = prefer_stun_server(&offer.stun_server, &args.stun);
+    let (reflexive, used_stun) = query_stun_with_failover(socket, &stun_servers).await?;
+    info!(reflexive = %reflexive, stun = %used_stun, "STUN reflexive address");
 
     let answer = SignalingPayload {
         msg_type: SignalingType::Answer,
         session_id: offer.session_id.clone(),
         reflexive_addr: reflexive.to_string(),
         local_addr: socket.local_addr().map_err(|e| e.to_string())?.to_string(),
-        stun_server: offer.stun_server.clone(),
+        stun_server: used_stun,
         timestamp: Timestamp::now().as_secs(),
     };
     let initiator_pubkey = offer_event.pubkey;
@@ -319,20 +323,16 @@ async fn run_initiator(args: &Args, keys: &Keys, relays: &[&RelayClient]) -> Res
     if advertised_stun.is_empty() {
         advertised_stun = args.stun.clone();
     }
-    let chosen_stun = advertised_stun
-        .first()
-        .cloned()
-        .ok_or("no STUN servers found in advertisement and none provided locally")?;
-    info!(stun = %chosen_stun, "chosen STUN server");
+    if advertised_stun.is_empty() {
+        return Err("no STUN servers found in advertisement and none provided locally".into());
+    }
 
     let socket = UdpSocket::bind(&args.bind)
         .await
         .map_err(|e| format!("failed to bind UDP socket {}: {e}", args.bind))?;
     info!(addr = %socket.local_addr().map_err(|e| e.to_string())?, "bound UDP socket");
 
-    let reflexive = stun_query(&socket, &chosen_stun)
-        .await
-        .map_err(|e| format!("STUN query failed: {e}"))?;
+    let (reflexive, chosen_stun) = query_stun_with_failover(&socket, &advertised_stun).await?;
     info!(reflexive = %reflexive, stun = %chosen_stun, "STUN reflexive address");
 
     let mut subs = subscribe_on_all(relays, keys.public_key()).await?;
@@ -448,6 +448,7 @@ async fn wait_for_first_signal(
             return Err(format!("timed out waiting for signal after {duration:?}"));
         }
 
+        let mut any_open = false;
         for sub in subscriptions.iter_mut() {
             match timeout(poll_step, sub.next()).await {
                 Ok(Some(event)) => {
@@ -455,10 +456,33 @@ async fn wait_for_first_signal(
                     return Ok(event);
                 }
                 Ok(None) => continue,
-                Err(_) => continue,
+                Err(_) => any_open = true,
             }
         }
+
+        if !any_open {
+            return Err("all relay subscriptions closed".into());
+        }
     }
+}
+
+async fn query_stun_with_failover(
+    socket: &UdpSocket,
+    stun_servers: &[String],
+) -> Result<(std::net::SocketAddrV4, String), String> {
+    stun_query_any(socket, stun_servers, STUN_ATTEMPT_TIMEOUT)
+        .await
+        .map_err(|e| format!("STUN query failed across {} servers: {e}", stun_servers.len()))
+}
+
+fn prefer_stun_server(primary: &str, fallbacks: &[String]) -> Vec<String> {
+    let mut servers = vec![primary.to_string()];
+    for server in fallbacks {
+        if server != primary {
+            servers.push(server.clone());
+        }
+    }
+    servers
 }
 
 async fn exchange_hello(

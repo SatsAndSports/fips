@@ -116,7 +116,7 @@ impl StunServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stun::client::stun_query;
+    use crate::stun::client::{stun_query, stun_query_any};
     use std::net::SocketAddrV4;
     use std::time::Duration;
 
@@ -188,6 +188,22 @@ mod tests {
         ports.sort();
         ports.dedup();
         assert_eq!(ports.len(), 3);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stun_try_multiple_servers_uses_first_success() {
+        let server = StunServer::bind("127.0.0.1:0").await.unwrap();
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let client_local = to_v4(client_sock.local_addr().unwrap());
+
+        let servers = vec!["127.0.0.1:9".to_string(), server.local_addr().to_string()];
+        let (reflexive, used_server) =
+            stun_query_any(&client_sock, &servers, Duration::from_millis(200)).await.unwrap();
+
+        assert_eq!(reflexive, client_local);
+        assert_eq!(used_server, server.local_addr().to_string());
 
         server.shutdown().await;
     }

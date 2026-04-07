@@ -20,6 +20,7 @@ pub struct TestRelay {
     url: String,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     task: JoinHandle<()>,
+    connections: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
 }
 
 /// Shared state across all connections.
@@ -38,12 +39,14 @@ impl TestRelay {
         let url = format!("ws://127.0.0.1:{port}");
 
         let state = Arc::new(RwLock::new(RelayState { events: Vec::new() }));
+        let connections = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let (broadcast_tx, _) = broadcast::channel::<Event>(256);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::spawn(Self::accept_loop(
             listener,
             state,
+            connections.clone(),
             broadcast_tx,
             shutdown_rx,
         ));
@@ -53,6 +56,7 @@ impl TestRelay {
             url,
             shutdown_tx,
             task,
+            connections,
         }
     }
 
@@ -65,11 +69,18 @@ impl TestRelay {
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.task.await;
+
+        let mut connections = self.connections.lock().await;
+        for task in connections.drain(..) {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     async fn accept_loop(
         listener: TcpListener,
         state: Arc<RwLock<RelayState>>,
+        connections: Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>,
         broadcast_tx: broadcast::Sender<Event>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
@@ -86,9 +97,10 @@ impl TestRelay {
                             let state = state.clone();
                             let broadcast_tx = broadcast_tx.clone();
                             let broadcast_rx = broadcast_tx.subscribe();
-                            tokio::spawn(Self::handle_connection(
+                            let task = tokio::spawn(Self::handle_connection(
                                 stream, state, broadcast_tx, broadcast_rx,
                             ));
+                            connections.lock().await.push(task);
                         }
                         Err(e) => warn!("test relay accept error: {e}"),
                     }

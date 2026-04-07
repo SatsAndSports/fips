@@ -56,7 +56,14 @@ impl RelayClient {
         // Channel for outgoing messages.
         let (write_tx, mut write_rx) = mpsc::channel::<String>(256);
 
+        let subscriptions: Arc<Mutex<HashMap<SubscriptionId, SubscriptionSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let pending_oks: Arc<Mutex<HashMap<EventId, oneshot::Sender<(bool, String)>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         // Writer task: drains the channel and sends to WebSocket.
+        let writer_subs = subscriptions.clone();
+        let writer_oks = pending_oks.clone();
         let writer = tokio::spawn(async move {
             while let Some(msg) = write_rx.recv().await {
                 if ws_write
@@ -67,12 +74,9 @@ impl RelayClient {
                     break;
                 }
             }
-        });
 
-        let subscriptions: Arc<Mutex<HashMap<SubscriptionId, SubscriptionSender>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let pending_oks: Arc<Mutex<HashMap<EventId, oneshot::Sender<(bool, String)>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+            Self::close_waiters(&writer_subs, &writer_oks).await;
+        });
 
         // Reader task: receives WebSocket messages and routes them.
         let subs_clone = subscriptions.clone();
@@ -95,11 +99,7 @@ impl RelayClient {
                 }
             }
 
-            // Connection closed — wake up any pending waiters.
-            let mut oks = oks_clone.lock().await;
-            for (_, tx) in oks.drain() {
-                let _ = tx.send((false, "connection closed".to_string()));
-            }
+            Self::close_waiters(&subs_clone, &oks_clone).await;
         });
 
         debug!("connected to relay at {url}");
@@ -238,6 +238,19 @@ impl RelayClient {
             _ => {
                 trace!("ignoring unhandled relay message");
             }
+        }
+    }
+
+    async fn close_waiters(
+        subscriptions: &Arc<Mutex<HashMap<SubscriptionId, SubscriptionSender>>>,
+        pending_oks: &Arc<Mutex<HashMap<EventId, oneshot::Sender<(bool, String)>>>>,
+    ) {
+        // Dropping subscription senders wakes `next()` and `wait_for_eose()`.
+        subscriptions.lock().await.clear();
+
+        let mut oks = pending_oks.lock().await;
+        for (_, tx) in oks.drain() {
+            let _ = tx.send((false, "connection closed".to_string()));
         }
     }
 }
@@ -527,5 +540,29 @@ mod tests {
         subscriber.disconnect().await;
         publisher.disconnect().await;
         relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_disconnect_closes_subscription() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+
+        let keys = Keys::generate();
+        let filter = Filter::new().kind(Kind::TextNote).author(keys.public_key());
+        let mut sub = client.subscribe(vec![filter]).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        // Shutting down the relay should eventually close the subscription
+        // instead of leaving next() hanging forever.
+        relay.shutdown().await;
+
+        let next = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("subscription did not wake after relay shutdown");
+        assert!(next.is_none(), "subscription should close when relay disconnects");
+
+        client.disconnect().await;
     }
 }

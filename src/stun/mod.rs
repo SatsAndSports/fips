@@ -11,7 +11,7 @@ pub mod client;
 pub mod server;
 pub mod wire;
 
-pub use client::stun_query;
+pub use client::{stun_query, stun_query_any};
 pub use server::StunServer;
 
 /// Errors that can occur during STUN operations.
