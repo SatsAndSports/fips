@@ -5,13 +5,13 @@
 //! and performs a simple UDP hello exchange after the punch succeeds.
 
 use clap::{Parser, ValueEnum};
-use fips::holepunch::punch::{parse_punch, run_punch, session_hash};
-use fips::holepunch::signaling::{
-    SignalingPayload, SignalingType, discover_service, extract_stun_servers, parse_signaling_event,
-    publish_service_advertisement, send_answer_all, send_offer_all, subscribe_signals,
+use fips::holepunch::orchestrator::{
+    HolePunchConfig, accept_offer, initiate_from_advertisement, subscribe_signals_all,
+    wait_for_first_offer,
 };
+use fips::holepunch::punch::{parse_punch, session_hash};
+use fips::holepunch::signaling::{discover_service_across_relays, publish_service_advertisement};
 use fips::nostr_relay::{RelayClient, Subscription};
-use fips::stun::stun_query_any;
 use fips::version;
 use futures::future::join_all;
 use nostr::prelude::*;
@@ -22,8 +22,6 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
-
-const STUN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Demo UDP hole punch over Nostr signaling.
 #[derive(Parser, Debug)]
@@ -224,7 +222,10 @@ async fn run_responder(
         .map_err(|e| format!("failed to bind UDP socket {}: {e}", args.bind))?;
     info!(addr = %socket.local_addr().map_err(|e| e.to_string())?, "bound UDP socket");
 
-    let mut subs = subscribe_on_all(relays, keys.public_key()).await?;
+    let config = hole_punch_config(args);
+    let mut subs = subscribe_signals_all(relays, keys.public_key())
+        .await
+        .map_err(|e| e.to_string())?;
 
     let stun_refs: Vec<&str> = args.stun.iter().map(String::as_str).collect();
     publish_service_advertisement(relays, keys, &stun_refs)
@@ -233,10 +234,14 @@ async fn run_responder(
     info!("published service advertisement");
 
     loop {
-        match handle_responder_session(args, keys, relays, &socket, &mut subs).await {
+        match handle_responder_session(keys, relays, &socket, &mut subs, &args.stun, &config).await
+        {
             Ok(()) => info!("responder ready for another connection"),
             Err(e) if e == "all relay subscriptions closed" => {
-                return Err("all relay subscriptions closed; restart the responder or add reconnect logic".into())
+                return Err(
+                    "all relay subscriptions closed; restart the responder or add reconnect logic"
+                        .into(),
+                );
             }
             Err(e) => warn!(error = %e, "responder session failed; continuing to listen"),
         }
@@ -244,68 +249,30 @@ async fn run_responder(
 }
 
 async fn handle_responder_session(
-    args: &Args,
     keys: &Keys,
     relays: &[&RelayClient],
     socket: &UdpSocket,
     subs: &mut [Subscription],
+    fallback_stun_servers: &[String],
+    config: &HolePunchConfig,
 ) -> Result<(), String> {
-    let offer_event = wait_for_first_signal(subs, None).await?;
-    let offer =
-        parse_signaling_event(&offer_event).map_err(|e| format!("failed to parse offer: {e}"))?;
-    if offer.msg_type != SignalingType::Offer {
-        return Err(format!("expected offer, got {:?}", offer.msg_type));
-    }
-    info!(session_id = %offer.session_id, from = %offer.reflexive_addr, "received offer");
-
-    let stun_servers = prefer_stun_server(&offer.stun_server, &args.stun);
-    let (reflexive, used_stun) = query_stun_with_failover(socket, &stun_servers).await?;
-    info!(reflexive = %reflexive, stun = %used_stun, "STUN reflexive address");
-
-    let answer = SignalingPayload {
-        msg_type: SignalingType::Answer,
-        session_id: offer.session_id.clone(),
-        reflexive_addr: reflexive.to_string(),
-        local_addr: socket.local_addr().map_err(|e| e.to_string())?.to_string(),
-        stun_server: used_stun,
-        timestamp: Timestamp::now().as_secs(),
-    };
-    let initiator_pubkey = offer_event.pubkey;
-
-    send_answer_all(relays, keys, &initiator_pubkey, &answer)
+    let incoming_offer = wait_for_first_offer(subs, None)
         .await
-        .map_err(|e| format!("failed to send answer: {e}"))?;
-    info!(session_id = %answer.session_id, "sent answer");
-
-    let peer_addr: SocketAddr = offer.reflexive_addr.parse().map_err(|e| {
-        format!(
-            "invalid peer reflexive address '{}': {e}",
-            offer.reflexive_addr
-        )
-    })?;
-    let punch_timeout = Duration::from_secs(args.timeout_secs);
-    let probe_interval = Duration::from_millis(args.probe_ms);
-
-    run_punch(
-        socket,
-        peer_addr,
-        &offer.session_id,
-        probe_interval,
-        punch_timeout,
-    )
-    .await
-    .map_err(|e| format!("hole punch failed: {e}"))?;
-    info!(peer = %peer_addr, "hole punch succeeded");
+        .map_err(|e| e.to_string())?;
+    let path = accept_offer(socket, relays, keys, &incoming_offer, fallback_stun_servers, config)
+        .await
+        .map_err(|e| e.to_string())?;
+    info!(session_id = %path.session_id, peer = %path.peer_addr, "hole punch succeeded");
 
     let received = exchange_hello(
         socket,
-        peer_addr,
+        path.peer_addr,
         Role::Responder,
-        &offer.session_id,
-        punch_timeout,
+        &path.session_id,
+        config.punch_timeout,
     )
     .await?;
-    info!(peer = %peer_addr, payload = %received, "received UDP payload");
+    info!(peer = %path.peer_addr, payload = %received, "received UDP payload");
 
     Ok(())
 }
@@ -318,171 +285,41 @@ async fn run_initiator(args: &Args, keys: &Keys, relays: &[&RelayClient]) -> Res
     let responder_pubkey = PublicKey::parse(responder_npub)
         .map_err(|e| format!("invalid responder npub '{responder_npub}': {e}"))?;
 
-    let advertisement = discover_across_relays(relays, &responder_pubkey).await?;
-    let mut advertised_stun = extract_stun_servers(&advertisement);
-    if advertised_stun.is_empty() {
-        advertised_stun = args.stun.clone();
-    }
-    if advertised_stun.is_empty() {
-        return Err("no STUN servers found in advertisement and none provided locally".into());
-    }
+    let advertisement = discover_service_across_relays(relays, &responder_pubkey)
+        .await
+        .map_err(|e| e.to_string())?;
+    let config = hole_punch_config(args);
 
     let socket = UdpSocket::bind(&args.bind)
         .await
         .map_err(|e| format!("failed to bind UDP socket {}: {e}", args.bind))?;
     info!(addr = %socket.local_addr().map_err(|e| e.to_string())?, "bound UDP socket");
 
-    let (reflexive, chosen_stun) = query_stun_with_failover(&socket, &advertised_stun).await?;
-    info!(reflexive = %reflexive, stun = %chosen_stun, "STUN reflexive address");
-
-    let mut subs = subscribe_on_all(relays, keys.public_key()).await?;
-
-    let session_id = hex::encode(rand::random::<[u8; 16]>());
-    let offer = SignalingPayload {
-        msg_type: SignalingType::Offer,
-        session_id: session_id.clone(),
-        reflexive_addr: reflexive.to_string(),
-        local_addr: socket.local_addr().map_err(|e| e.to_string())?.to_string(),
-        stun_server: chosen_stun,
-        timestamp: Timestamp::now().as_secs(),
-    };
-
-    send_offer_all(relays, keys, &responder_pubkey, &offer)
+    let path = initiate_from_advertisement(&socket, relays, keys, &advertisement, &config)
         .await
-        .map_err(|e| format!("failed to send offer: {e}"))?;
-    info!(session_id = %offer.session_id, to = %responder_npub, "sent offer");
-
-    let answer_event =
-        wait_for_first_signal(&mut subs, Some(Duration::from_secs(args.timeout_secs))).await?;
-    let answer =
-        parse_signaling_event(&answer_event).map_err(|e| format!("failed to parse answer: {e}"))?;
-    if answer.msg_type != SignalingType::Answer {
-        return Err(format!("expected answer, got {:?}", answer.msg_type));
-    }
-    if answer.session_id != session_id {
-        return Err(format!(
-            "session mismatch: expected {}, got {}",
-            session_id, answer.session_id
-        ));
-    }
-    info!(session_id = %answer.session_id, from = %answer.reflexive_addr, "received answer");
-
-    let peer_addr: SocketAddr = answer.reflexive_addr.parse().map_err(|e| {
-        format!(
-            "invalid peer reflexive address '{}': {e}",
-            answer.reflexive_addr
-        )
-    })?;
-    let punch_timeout = Duration::from_secs(args.timeout_secs);
-    let probe_interval = Duration::from_millis(args.probe_ms);
-
-    run_punch(
-        &socket,
-        peer_addr,
-        &session_id,
-        probe_interval,
-        punch_timeout,
-    )
-    .await
-    .map_err(|e| format!("hole punch failed: {e}"))?;
-    info!(peer = %peer_addr, "hole punch succeeded");
+        .map_err(|e| e.to_string())?;
+    info!(session_id = %path.session_id, peer = %path.peer_addr, "hole punch succeeded");
 
     let received = exchange_hello(
         &socket,
-        peer_addr,
+        path.peer_addr,
         Role::Initiator,
-        &session_id,
-        punch_timeout,
+        &path.session_id,
+        config.punch_timeout,
     )
     .await?;
-    info!(peer = %peer_addr, payload = %received, "received UDP payload");
+    info!(peer = %path.peer_addr, payload = %received, "received UDP payload");
 
-    close_subscriptions(subs).await;
     Ok(())
 }
 
-async fn subscribe_on_all(
-    relays: &[&RelayClient],
-    my_pubkey: PublicKey,
-) -> Result<Vec<Subscription>, String> {
-    let mut subs = Vec::with_capacity(relays.len());
-    for relay in relays {
-        let sub = subscribe_signals(relay, &my_pubkey)
-            .await
-            .map_err(|e| format!("failed to subscribe for signals: {e}"))?;
-        subs.push(sub);
+fn hole_punch_config(args: &Args) -> HolePunchConfig {
+    HolePunchConfig {
+        signal_timeout: Duration::from_secs(args.timeout_secs),
+        stun_attempt_timeout: Duration::from_secs(2),
+        probe_interval: Duration::from_millis(args.probe_ms),
+        punch_timeout: Duration::from_secs(args.timeout_secs),
     }
-    Ok(subs)
-}
-
-async fn discover_across_relays(
-    relays: &[&RelayClient],
-    responder_pubkey: &PublicKey,
-) -> Result<Event, String> {
-    for relay in relays {
-        match discover_service(relay, responder_pubkey).await {
-            Ok(Some(event)) => {
-                info!(event_id = %event.id, author = %event.pubkey, "discovered service advertisement");
-                return Ok(event);
-            }
-            Ok(None) => continue,
-            Err(e) => warn!(error = %e, "service discovery failed on one relay"),
-        }
-    }
-
-    Err("service advertisement not found on any relay".into())
-}
-
-async fn wait_for_first_signal(
-    subscriptions: &mut [Subscription],
-    timeout_duration: Option<Duration>,
-) -> Result<Event, String> {
-    let deadline = timeout_duration.map(|duration| Instant::now() + duration);
-    let poll_step = Duration::from_millis(50);
-
-    loop {
-        if let Some(deadline) = deadline
-            && Instant::now() >= deadline
-        {
-            let duration = timeout_duration.expect("deadline implies timeout duration");
-            return Err(format!("timed out waiting for signal after {duration:?}"));
-        }
-
-        let mut any_open = false;
-        for sub in subscriptions.iter_mut() {
-            match timeout(poll_step, sub.next()).await {
-                Ok(Some(event)) => {
-                    debug!(event_id = %event.id, author = %event.pubkey, "received signal event");
-                    return Ok(event);
-                }
-                Ok(None) => continue,
-                Err(_) => any_open = true,
-            }
-        }
-
-        if !any_open {
-            return Err("all relay subscriptions closed".into());
-        }
-    }
-}
-
-async fn query_stun_with_failover(
-    socket: &UdpSocket,
-    stun_servers: &[String],
-) -> Result<(std::net::SocketAddrV4, String), String> {
-    stun_query_any(socket, stun_servers, STUN_ATTEMPT_TIMEOUT)
-        .await
-        .map_err(|e| format!("STUN query failed across {} servers: {e}", stun_servers.len()))
-}
-
-fn prefer_stun_server(primary: &str, fallbacks: &[String]) -> Vec<String> {
-    let mut servers = vec![primary.to_string()];
-    for server in fallbacks {
-        if server != primary {
-            servers.push(server.clone());
-        }
-    }
-    servers
 }
 
 async fn exchange_hello(
@@ -526,13 +363,5 @@ async fn exchange_hello(
         }
 
         return Ok(String::from_utf8_lossy(&buf[..n]).to_string());
-    }
-}
-
-async fn close_subscriptions(subscriptions: Vec<Subscription>) {
-    for sub in subscriptions {
-        if let Err(e) = sub.close().await {
-            warn!(error = %e, "failed to close subscription");
-        }
     }
 }
