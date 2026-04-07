@@ -12,6 +12,7 @@ pub mod holepunch;
 pub mod identity;
 pub mod mmp;
 pub mod noise;
+pub mod nostr_relay;
 pub mod utils;
 pub mod node;
 pub mod peer;

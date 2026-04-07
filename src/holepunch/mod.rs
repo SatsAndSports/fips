@@ -4,14 +4,15 @@
 //! between two peers behind NAT. The protocol uses:
 //!
 //! - **STUN** for reflexive address discovery (see [`crate::stun`])
-//! - **Nostr relays** for signaling (offer/answer exchange) — not yet implemented
-//! - **UDP punch packets** for NAT traversal (this module)
+//! - **Nostr relays** for signaling (offer/answer exchange)
+//! - **UDP punch packets** for NAT traversal
 //!
 //! The punch packet format follows the Nostr UDP Hole Punch Protocol proposal,
 //! using `NPTC` (probe) and `NPTA` (ack) packets with a shared session hash
 //! for correlation.
 
 pub mod punch;
+pub mod signaling;
 
 use std::time::Duration;
 
