@@ -6,12 +6,12 @@
 //! parameterized replaceable events (kind 30000–39999).
 
 use futures::{SinkExt, StreamExt};
-use nostr::prelude::*;
 use nostr::filter::MatchEventOptions;
+use nostr::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
@@ -37,13 +37,16 @@ impl TestRelay {
         let port = listener.local_addr().unwrap().port();
         let url = format!("ws://127.0.0.1:{port}");
 
-        let state = Arc::new(RwLock::new(RelayState {
-            events: Vec::new(),
-        }));
+        let state = Arc::new(RwLock::new(RelayState { events: Vec::new() }));
         let (broadcast_tx, _) = broadcast::channel::<Event>(256);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
 
-        let task = tokio::spawn(Self::accept_loop(listener, state, broadcast_tx, shutdown_rx));
+        let task = tokio::spawn(Self::accept_loop(
+            listener,
+            state,
+            broadcast_tx,
+            shutdown_rx,
+        ));
 
         debug!("test relay started on {url}");
         Self {
@@ -249,15 +252,15 @@ impl TestRelay {
                 let s = state.read().await;
                 for event in &s.events {
                     if filters.iter().any(|f| f.match_event(event, opts)) {
-                        let relay_msg =
-                            RelayMessage::event(subscription_id.clone(), event.clone());
+                        let relay_msg = RelayMessage::event(subscription_id.clone(), event.clone());
                         let _ = out_tx.send(relay_msg.as_json()).await;
                     }
                 }
                 drop(s);
 
                 // End of stored events.
-                let eose = RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(subscription_id));
+                let eose =
+                    RelayMessage::EndOfStoredEvents(std::borrow::Cow::Owned(subscription_id));
                 let _ = out_tx.send(eose.as_json()).await;
             }
             ClientMessage::Close(sub_id) => {

@@ -56,10 +56,7 @@ impl StunServer {
 
     /// Main server loop: receive Binding Requests, respond with
     /// XOR-MAPPED-ADDRESS echoing the observed source address.
-    async fn serve_loop(
-        socket: UdpSocket,
-        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    ) {
+    async fn serve_loop(socket: UdpSocket, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) {
         let mut buf = [0u8; 1024];
 
         loop {

@@ -3,8 +3,9 @@
 //! Implements the punch phase of the Nostr UDP Hole Punch Protocol:
 //! both peers simultaneously send NPTC probe packets to each other's
 //! reflexive address, and reply with NPTA ack packets. The hole is
-//! considered punched when a peer receives an NPTA (proving bidirectional
-//! reachability).
+//! considered punched only after a peer has both received a probe from the
+//! other side and received an ack to one of its own probes. This prevents one
+//! side from exiting too early and leaving the other side waiting for an ack.
 //!
 //! Packet format (24 bytes):
 //!
@@ -109,8 +110,9 @@ pub fn parse_punch(buf: &[u8], expected_hash: &[u8; 16]) -> Option<PunchPacket> 
 ///
 /// Sends NPTC probes every `probe_interval` to `peer_addr`, listens for
 /// incoming NPTC/NPTA packets. Returns `Ok(())` when bidirectional
-/// connectivity is confirmed (received an NPTA), or `Err(Timeout)` if
-/// `punch_timeout` elapses without success.
+/// connectivity is confirmed (we have seen the peer's probe and received an
+/// ack to one of our own probes), or `Err(Timeout)` if `punch_timeout`
+/// elapses without success.
 ///
 /// The caller must ensure the socket is already bound and is the same
 /// socket used for the preceding STUN query (to preserve the NAT mapping).
@@ -126,6 +128,8 @@ pub async fn run_punch(
     let mut ticker = interval(probe_interval);
     let mut seq: u32 = 0;
     let mut buf = [0u8; 64];
+    let mut got_probe = false;
+    let mut got_ack = false;
 
     debug!("hole punching: sending to {peer_addr}, timeout {punch_timeout:?}");
 
@@ -153,20 +157,34 @@ pub async fn run_punch(
                 match parse_punch(&buf[..n], &hash) {
                     Some(PunchPacket::Probe { seq: peer_seq }) => {
                         trace!("received NPTC seq={peer_seq} from {from}");
+                        got_probe = true;
                         // Immediately ack the probe.
                         let ack = build_punch_ack(peer_seq, &hash);
                         socket.send_to(&ack, from).await?;
                         trace!("sent NPTA seq={peer_seq} to {from}");
+
+                        if got_ack {
+                            debug!(
+                                "hole punch complete: received peer probe and prior NPTA from {from} \
+                                 after {:.1}s",
+                                start.elapsed().as_secs_f64()
+                            );
+                            return Ok(());
+                        }
                     }
                     Some(PunchPacket::Ack { seq: acked_seq }) => {
-                        // The peer received our probe and acked it.
-                        // This proves bidirectional reachability.
-                        debug!(
-                            "hole punch complete: received NPTA seq={acked_seq} from {from} \
-                             after {:.1}s",
-                            start.elapsed().as_secs_f64()
-                        );
-                        return Ok(());
+                        // The peer received one of our probes and acked it.
+                        got_ack = true;
+                        trace!("received NPTA seq={acked_seq} from {from}");
+
+                        if got_probe {
+                            debug!(
+                                "hole punch complete: received peer probe and NPTA seq={acked_seq} \
+                                 from {from} after {:.1}s",
+                                start.elapsed().as_secs_f64()
+                            );
+                            return Ok(());
+                        }
                     }
                     None => {
                         // Not a punch packet (stray traffic, STUN leftover, etc.)
@@ -272,9 +290,61 @@ mod tests {
         // Both peers punch concurrently. On localhost without NAT,
         // the first probe from each side arrives immediately.
         let (result_a, result_b) = tokio::join!(
-            run_punch(&sock_a, addr_b, session_id, DEFAULT_PROBE_INTERVAL, DEFAULT_PUNCH_TIMEOUT),
-            run_punch(&sock_b, addr_a, session_id, DEFAULT_PROBE_INTERVAL, DEFAULT_PUNCH_TIMEOUT),
+            run_punch(
+                &sock_a,
+                addr_b,
+                session_id,
+                DEFAULT_PROBE_INTERVAL,
+                DEFAULT_PUNCH_TIMEOUT
+            ),
+            run_punch(
+                &sock_b,
+                addr_a,
+                session_id,
+                DEFAULT_PROBE_INTERVAL,
+                DEFAULT_PUNCH_TIMEOUT
+            ),
         );
+
+        result_a.unwrap();
+        result_b.unwrap();
+    }
+
+    #[tokio::test]
+    async fn punch_two_peers_staggered_start() {
+        let session_id = "staggered-start-session-1234";
+
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+
+        // Start peer A first, then let peer B join later. This mirrors the
+        // real-world case where one side finishes signaling and begins
+        // punching slightly before the other.
+        let punch_a = tokio::spawn(async move {
+            run_punch(
+                &sock_a,
+                addr_b,
+                session_id,
+                DEFAULT_PROBE_INTERVAL,
+                DEFAULT_PUNCH_TIMEOUT,
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        let result_b = run_punch(
+            &sock_b,
+            addr_a,
+            session_id,
+            DEFAULT_PROBE_INTERVAL,
+            DEFAULT_PUNCH_TIMEOUT,
+        )
+        .await;
+
+        let result_a = punch_a.await.unwrap();
 
         result_a.unwrap();
         result_b.unwrap();

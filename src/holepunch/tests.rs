@@ -3,15 +3,15 @@
 //! Exercises all phases on localhost: STUN discovery → Nostr signaling
 //! (service advertisement, offer, answer) → UDP punch.
 
-use crate::holepunch::punch::{run_punch, DEFAULT_PROBE_INTERVAL, DEFAULT_PUNCH_TIMEOUT};
+use crate::holepunch::punch::{DEFAULT_PROBE_INTERVAL, DEFAULT_PUNCH_TIMEOUT, run_punch};
 use crate::holepunch::signaling::{
-    discover_service, extract_stun_servers, parse_signaling_event, publish_service_advertisement,
-    send_answer, send_offer, subscribe_signals, SignalingPayload, SignalingType,
+    SignalingPayload, SignalingType, discover_service, extract_stun_servers, parse_signaling_event,
+    publish_service_advertisement, send_answer, send_offer, subscribe_signals,
 };
+use crate::nostr_relay::RelayClient;
 use crate::nostr_relay::init_test_logging;
 use crate::nostr_relay::test_relay::TestRelay;
-use crate::nostr_relay::RelayClient;
-use crate::stun::{stun_query, StunServer};
+use crate::stun::{StunServer, stun_query};
 use nostr::prelude::*;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
@@ -34,18 +34,13 @@ async fn full_holepunch_localhost() {
 
     let responder_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
-    let mut responder_sub =
-        subscribe_signals(&responder_client, &responder_keys.public_key())
-            .await
-            .unwrap();
+    let mut responder_sub = subscribe_signals(&responder_client, &responder_keys.public_key())
+        .await
+        .unwrap();
 
-    publish_service_advertisement(
-        &[&responder_client],
-        &responder_keys,
-        &[&stun_addr],
-    )
-    .await
-    .unwrap();
+    publish_service_advertisement(&[&responder_client], &responder_keys, &[&stun_addr])
+        .await
+        .unwrap();
 
     // --- Initiator: discover service ---
     let initiator_client = RelayClient::connect(relay.url()).await.unwrap();
@@ -57,7 +52,10 @@ async fn full_holepunch_localhost() {
 
     // Extract the STUN server from the advertisement.
     let stun_servers = extract_stun_servers(&advertisement);
-    assert!(!stun_servers.is_empty(), "advertisement should list STUN servers");
+    assert!(
+        !stun_servers.is_empty(),
+        "advertisement should list STUN servers"
+    );
     let chosen_stun = &stun_servers[0];
 
     // --- Initiator: STUN query + send offer ---
@@ -67,10 +65,9 @@ async fn full_holepunch_localhost() {
 
     let session_id = hex::encode(rand::random::<[u8; 16]>());
 
-    let mut initiator_sub =
-        subscribe_signals(&initiator_client, &initiator_keys.public_key())
-            .await
-            .unwrap();
+    let mut initiator_sub = subscribe_signals(&initiator_client, &initiator_keys.public_key())
+        .await
+        .unwrap();
 
     let offer = SignalingPayload {
         msg_type: SignalingType::Offer,
@@ -91,21 +88,19 @@ async fn full_holepunch_localhost() {
     .unwrap();
 
     // --- Responder: receive offer, STUN query, send answer ---
-    let offer_event = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        responder_sub.next(),
-    )
-    .await
-    .expect("responder timed out waiting for offer")
-    .expect("responder subscription closed");
+    let offer_event = tokio::time::timeout(std::time::Duration::from_secs(5), responder_sub.next())
+        .await
+        .expect("responder timed out waiting for offer")
+        .expect("responder subscription closed");
 
     let received_offer = parse_signaling_event(&offer_event).unwrap();
     assert_eq!(received_offer.msg_type, SignalingType::Offer);
     assert_eq!(received_offer.session_id, session_id);
 
     // Responder does its own STUN query using the punch socket.
-    let responder_reflexive =
-        stun_query(&responder_sock, &received_offer.stun_server).await.unwrap();
+    let responder_reflexive = stun_query(&responder_sock, &received_offer.stun_server)
+        .await
+        .unwrap();
 
     let answer = SignalingPayload {
         msg_type: SignalingType::Answer,
@@ -126,13 +121,11 @@ async fn full_holepunch_localhost() {
     .unwrap();
 
     // --- Initiator: receive answer ---
-    let answer_event = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        initiator_sub.next(),
-    )
-    .await
-    .expect("initiator timed out waiting for answer")
-    .expect("initiator subscription closed");
+    let answer_event =
+        tokio::time::timeout(std::time::Duration::from_secs(5), initiator_sub.next())
+            .await
+            .expect("initiator timed out waiting for answer")
+            .expect("initiator subscription closed");
 
     let received_answer = parse_signaling_event(&answer_event).unwrap();
     assert_eq!(received_answer.msg_type, SignalingType::Answer);

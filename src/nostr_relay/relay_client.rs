@@ -133,9 +133,7 @@ impl RelayClient {
             .map_err(|_| NostrError::ConnectionClosed)?;
 
         // Wait for the OK response.
-        let (accepted, message) = ok_rx
-            .await
-            .map_err(|_| NostrError::ConnectionClosed)?;
+        let (accepted, message) = ok_rx.await.map_err(|_| NostrError::ConnectionClosed)?;
 
         if accepted {
             trace!("event {event_id} accepted");

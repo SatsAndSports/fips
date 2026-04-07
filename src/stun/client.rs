@@ -19,10 +19,7 @@ const STUN_TIMEOUT: Duration = Duration::from_secs(5);
 /// reused for the subsequent punch phase to preserve the NAT mapping.
 ///
 /// `stun_server` is a `"host:port"` string that will be resolved via DNS.
-pub async fn stun_query(
-    socket: &UdpSocket,
-    stun_server: &str,
-) -> Result<SocketAddrV4, StunError> {
+pub async fn stun_query(socket: &UdpSocket, stun_server: &str) -> Result<SocketAddrV4, StunError> {
     let (request, txn_id) = build_binding_request();
 
     // Resolve the STUN server address.

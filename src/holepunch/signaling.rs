@@ -13,8 +13,8 @@
 //! Currently uses plaintext signaling events. NIP-44 encryption and
 //! NIP-59 gift wrapping will be added later.
 
-use crate::nostr_relay::RelayClient;
 use crate::nostr_relay::NostrError;
+use crate::nostr_relay::RelayClient;
 use crate::nostr_relay::Subscription;
 use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -67,14 +67,11 @@ pub async fn publish_service_advertisement(
     keys: &Keys,
     stun_servers: &[&str],
 ) -> Result<Event, NostrError> {
-    let mut builder = EventBuilder::new(Kind::Custom(SERVICE_AD_KIND), "")
-        .tag(Tag::identifier(FIPS_SERVICE_TAG));
+    let mut builder =
+        EventBuilder::new(Kind::Custom(SERVICE_AD_KIND), "").tag(Tag::identifier(FIPS_SERVICE_TAG));
 
     for stun in stun_servers {
-        builder = builder.tag(Tag::custom(
-            TagKind::custom("stun"),
-            [*stun],
-        ));
+        builder = builder.tag(Tag::custom(TagKind::custom("stun"), [*stun]));
     }
 
     let event = builder
@@ -114,13 +111,10 @@ pub async fn discover_service(
     // Try to receive a stored event (should arrive before EOSE).
     // Use a short timeout since EOSE already arrived — if there's an
     // event it's already in the channel.
-    let event = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        sub.next(),
-    )
-    .await
-    .ok()
-    .flatten();
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), sub.next())
+        .await
+        .ok()
+        .flatten();
 
     sub.close().await?;
 
@@ -157,13 +151,7 @@ pub async fn send_offer(
     responder_pubkey: &PublicKey,
     payload: &SignalingPayload,
 ) -> Result<Event, NostrError> {
-    let content =
-        serde_json::to_string(payload).map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
-
-    let event = EventBuilder::new(Kind::Custom(SIGNAL_KIND), &content)
-        .tag(Tag::public_key(*responder_pubkey))
-        .sign_with_keys(keys)
-        .map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
+    let event = build_signal_event(keys, responder_pubkey, payload)?;
 
     debug!(
         "sending offer: session_id={}, event_id={}",
@@ -174,6 +162,29 @@ pub async fn send_offer(
     Ok(event)
 }
 
+/// Send an offer to all configured relays using the same signed event.
+pub async fn send_offer_all(
+    relays: &[&RelayClient],
+    keys: &Keys,
+    responder_pubkey: &PublicKey,
+    payload: &SignalingPayload,
+) -> Result<Event, NostrError> {
+    let event = build_signal_event(keys, responder_pubkey, payload)?;
+
+    debug!(
+        "sending offer to {} relays: session_id={}, event_id={}",
+        relays.len(),
+        payload.session_id,
+        event.id
+    );
+
+    for relay in relays {
+        relay.publish(event.clone()).await?;
+    }
+
+    Ok(event)
+}
+
 /// Send an answer to the initiator (kind 21059).
 pub async fn send_answer(
     client: &RelayClient,
@@ -181,13 +192,7 @@ pub async fn send_answer(
     initiator_pubkey: &PublicKey,
     payload: &SignalingPayload,
 ) -> Result<Event, NostrError> {
-    let content =
-        serde_json::to_string(payload).map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
-
-    let event = EventBuilder::new(Kind::Custom(SIGNAL_KIND), &content)
-        .tag(Tag::public_key(*initiator_pubkey))
-        .sign_with_keys(keys)
-        .map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
+    let event = build_signal_event(keys, initiator_pubkey, payload)?;
 
     debug!(
         "sending answer: session_id={}, event_id={}",
@@ -195,6 +200,29 @@ pub async fn send_answer(
     );
 
     client.publish(event.clone()).await?;
+    Ok(event)
+}
+
+/// Send an answer to all configured relays using the same signed event.
+pub async fn send_answer_all(
+    relays: &[&RelayClient],
+    keys: &Keys,
+    initiator_pubkey: &PublicKey,
+    payload: &SignalingPayload,
+) -> Result<Event, NostrError> {
+    let event = build_signal_event(keys, initiator_pubkey, payload)?;
+
+    debug!(
+        "sending answer to {} relays: session_id={}, event_id={}",
+        relays.len(),
+        payload.session_id,
+        event.id
+    );
+
+    for relay in relays {
+        relay.publish(event.clone()).await?;
+    }
+
     Ok(event)
 }
 
@@ -215,6 +243,20 @@ pub fn extract_stun_servers(event: &Event) -> Vec<String> {
         .filter(|t| t.kind() == TagKind::custom("stun"))
         .filter_map(|t| t.content().map(|s| s.to_string()))
         .collect()
+}
+
+fn build_signal_event(
+    keys: &Keys,
+    recipient_pubkey: &PublicKey,
+    payload: &SignalingPayload,
+) -> Result<Event, NostrError> {
+    let content =
+        serde_json::to_string(payload).map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
+
+    EventBuilder::new(Kind::Custom(SIGNAL_KIND), &content)
+        .tag(Tag::public_key(*recipient_pubkey))
+        .sign_with_keys(keys)
+        .map_err(|e| NostrError::InvalidEvent(e.to_string()))
 }
 
 #[cfg(test)]
@@ -257,13 +299,9 @@ mod tests {
         let responder_keys = Keys::generate();
 
         // Publish a service advertisement.
-        publish_service_advertisement(
-            &[&client],
-            &responder_keys,
-            &["stun.example.com:3478"],
-        )
-        .await
-        .unwrap();
+        publish_service_advertisement(&[&client], &responder_keys, &["stun.example.com:3478"])
+            .await
+            .unwrap();
 
         // Discover it from the same relay.
         let discovered = discover_service(&client, &responder_keys.public_key())
@@ -303,10 +341,9 @@ mod tests {
 
         // --- Responder setup (order matters!) ---
         // 1. Subscribe for signals FIRST.
-        let mut responder_sub =
-            subscribe_signals(&responder_client, &responder_keys.public_key())
-                .await
-                .unwrap();
+        let mut responder_sub = subscribe_signals(&responder_client, &responder_keys.public_key())
+            .await
+            .unwrap();
 
         // 2. Then publish service advertisement.
         publish_service_advertisement(
@@ -348,10 +385,9 @@ mod tests {
 
         // --- Responder sends answer ---
         // First subscribe for the answer on the initiator side.
-        let mut initiator_sub =
-            subscribe_signals(&initiator_client, &initiator_keys.public_key())
-                .await
-                .unwrap();
+        let mut initiator_sub = subscribe_signals(&initiator_client, &initiator_keys.public_key())
+            .await
+            .unwrap();
 
         let answer = make_answer(session_id);
         send_answer(
