@@ -15,6 +15,7 @@ pub mod utils;
 pub mod node;
 pub mod peer;
 pub mod protocol;
+pub mod stun;
 pub mod transport;
 pub mod tree;
 pub mod upper;
