@@ -879,8 +879,10 @@ async fn run_responder_worker(
 mod tests {
     use super::*;
     use crate::holepunch::signaling::publish_service_advertisement;
+    use crate::nostr_relay::init_test_logging;
     use crate::nostr_relay::test_relay::TestRelay;
-    use tokio::time::{Duration, sleep};
+    use crate::stun::StunServer;
+    use tokio::time::{Duration, sleep, timeout};
 
     #[test]
     fn latest_advertisement_wins_by_created_at() {
@@ -1034,5 +1036,156 @@ mod tests {
             ..offer
         };
         assert!(!dedup.should_skip(&different_session, ttl));
+    }
+
+    /// End-to-end transport integration test.
+    ///
+    /// Two `UdpHolePunchTransport` instances (initiator + responder) on
+    /// localhost with a local STUN server and in-process Nostr relay.
+    /// Verifies: advertisement discovery → connect → bidirectional data.
+    #[tokio::test]
+    async fn transport_connect_and_send() {
+        init_test_logging();
+
+        // --- Infrastructure ---
+        let stun_server = StunServer::bind("127.0.0.1:0").await.unwrap();
+        let stun_addr = stun_server.local_addr().to_string();
+        let relay = TestRelay::start().await;
+        let relay_url = relay.url().to_string();
+
+        let responder_keys = Keys::generate();
+        let initiator_keys = Keys::generate();
+
+        // --- Responder transport ---
+        // accept_connections=true so it publishes an advertisement and
+        // listens for offers. auto_connect=false since it doesn't initiate.
+        let responder_config = UdpHolePunchConfig {
+            bind_ip: Some("127.0.0.1".to_string()),
+            relays: vec![relay_url.clone()],
+            stun_servers: vec![stun_addr.clone()],
+            accept_connections: Some(true),
+            auto_connect: Some(false),
+            timeout_secs: Some(5),
+            probe_ms: Some(50),
+        };
+        let (responder_packet_tx, mut responder_packet_rx) =
+            crate::transport::packet_channel(64);
+        let mut responder = UdpHolePunchTransport::new(
+            TransportId::new(1),
+            None,
+            responder_config,
+            responder_packet_tx,
+        );
+        responder.set_keys(responder_keys.clone());
+        responder.start_async().await.unwrap();
+
+        // Give the responder worker time to connect to the relay and
+        // publish its advertisement before the initiator subscribes.
+        sleep(Duration::from_millis(300)).await;
+
+        // --- Initiator transport ---
+        // auto_connect=true so it runs a discovery worker that will pick
+        // up the responder's advertisement. accept_connections=false.
+        let initiator_config = UdpHolePunchConfig {
+            bind_ip: Some("127.0.0.1".to_string()),
+            relays: vec![relay_url.clone()],
+            stun_servers: vec![stun_addr.clone()],
+            auto_connect: Some(true),
+            accept_connections: Some(false),
+            timeout_secs: Some(5),
+            probe_ms: Some(50),
+        };
+        let (initiator_packet_tx, mut initiator_packet_rx) =
+            crate::transport::packet_channel(64);
+        let mut initiator = UdpHolePunchTransport::new(
+            TransportId::new(2),
+            None,
+            initiator_config,
+            initiator_packet_tx,
+        );
+        initiator.set_keys(initiator_keys.clone());
+        initiator.start_async().await.unwrap();
+
+        // --- Wait for the initiator to discover the responder ---
+        let discovered_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                let discovered = initiator.discover().unwrap();
+                if let Some(peer) = discovered.into_iter().next() {
+                    assert_eq!(
+                        peer.pubkey_hint,
+                        XOnlyPublicKey::from_slice(
+                            responder_keys.public_key().as_bytes()
+                        )
+                        .ok()
+                    );
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for initiator to discover responder");
+
+        // --- Initiator connects (STUN + signaling + punch) ---
+        initiator.connect_async(&discovered_handle).await.unwrap();
+
+        timeout(Duration::from_secs(10), async {
+            loop {
+                match initiator.connection_state_sync(&discovered_handle) {
+                    ConnectionState::Connected => break,
+                    ConnectionState::Failed(reason) => {
+                        panic!("initiator connect failed: {reason}");
+                    }
+                    _ => sleep(Duration::from_millis(50)).await,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for initiator connection");
+
+        // --- Send data: initiator → responder ---
+        let payload_a = b"hello from initiator";
+        initiator
+            .send_async(&discovered_handle, payload_a)
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_secs(2), responder_packet_rx.recv())
+            .await
+            .expect("timed out waiting for responder to receive packet")
+            .expect("responder packet channel closed");
+        assert_eq!(received.data, payload_a);
+        assert_eq!(received.transport_id, TransportId::new(1));
+
+        // --- Send data: responder → initiator ---
+        // Find the responder's inbound connection handle (hp:...).
+        let responder_handle = {
+            let connections = responder.shared.connections.lock().unwrap();
+            assert_eq!(
+                connections.len(),
+                1,
+                "responder should have exactly one inbound connection"
+            );
+            connections.keys().next().unwrap().clone()
+        };
+
+        let payload_b = b"hello from responder";
+        responder
+            .send_async(&responder_handle, payload_b)
+            .await
+            .unwrap();
+
+        let received = timeout(Duration::from_secs(2), initiator_packet_rx.recv())
+            .await
+            .expect("timed out waiting for initiator to receive packet")
+            .expect("initiator packet channel closed");
+        assert_eq!(received.data, payload_b);
+        assert_eq!(received.transport_id, TransportId::new(2));
+
+        // --- Cleanup ---
+        initiator.stop_async().await.unwrap();
+        responder.stop_async().await.unwrap();
+        relay.shutdown().await;
+        stun_server.shutdown().await;
     }
 }
