@@ -8,7 +8,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml build.rs ./
 COPY src ./src
 
-RUN cargo build --release --bin fips --bin fipsctl && \
+RUN cargo build --release --no-default-features --bin fips --bin fipsctl && \
     cp target/release/fips target/release/fipsctl /usr/local/bin/
 
 FROM debian:trixie-slim

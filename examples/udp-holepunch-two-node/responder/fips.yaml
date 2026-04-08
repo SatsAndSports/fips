@@ -1,6 +1,6 @@
 node:
   identity:
-    nsec: "nsec1REPLACE_ME_RESPONDER"
+    nsec: "5860916e7906d53e16310df39eeb6658c3338f645c892511892549c961b79608"
   log_level: debug
 
 tun:
