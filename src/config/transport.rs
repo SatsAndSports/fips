@@ -19,8 +19,8 @@ const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
 /// Default UDP send buffer size (2 MB).
 const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 
-/// Default UDP hole-punch bind address.
-const DEFAULT_UDP_HOLEPUNCH_BIND_ADDR: &str = "0.0.0.0:0";
+/// Default UDP hole-punch bind IP.
+const DEFAULT_UDP_HOLEPUNCH_BIND_IP: &str = "0.0.0.0";
 
 /// Default hole-punch probe interval in milliseconds.
 const DEFAULT_UDP_HOLEPUNCH_PROBE_MS: u64 = 200;
@@ -75,9 +75,9 @@ impl UdpConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UdpHolePunchConfig {
-    /// Bind address for the UDP socket. Defaults to "0.0.0.0:0".
+    /// Local IP/interface to bind per-peer UDP sockets on. Defaults to "0.0.0.0".
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bind_addr: Option<String>,
+    pub bind_ip: Option<String>,
 
     /// Nostr relays used for advertisement discovery and signaling.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -105,11 +105,11 @@ pub struct UdpHolePunchConfig {
 }
 
 impl UdpHolePunchConfig {
-    /// Get the bind address, using the default if not configured.
-    pub fn bind_addr(&self) -> &str {
-        self.bind_addr
+    /// Get the bind IP, using the default if not configured.
+    pub fn bind_ip(&self) -> &str {
+        self.bind_ip
             .as_deref()
-            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_BIND_ADDR)
+            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_BIND_IP)
     }
 
     /// Get the punch probe interval in milliseconds. Default: 200.

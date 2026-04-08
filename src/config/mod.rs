@@ -911,7 +911,7 @@ transports:
         let yaml = r#"
 transports:
   udp_holepunch:
-    bind_addr: "0.0.0.0:0"
+    bind_ip: "0.0.0.0"
     relays:
       - "wss://relay.damus.io"
     stun_servers:
@@ -923,7 +923,7 @@ transports:
         assert_eq!(config.transports.udp_holepunch.len(), 1);
         let instances: Vec<_> = config.transports.udp_holepunch.iter().collect();
         assert_eq!(instances[0].0, None); // Single instance has no name
-        assert_eq!(instances[0].1.bind_addr(), "0.0.0.0:0");
+        assert_eq!(instances[0].1.bind_ip(), "0.0.0.0");
         assert_eq!(
             instances[0].1.relays,
             vec!["wss://relay.damus.io".to_string()]
@@ -970,6 +970,7 @@ transports:
         );
     }
 
+    #[test]
     fn test_parse_transport_empty() {
         let yaml = r#"
 transports: {}
