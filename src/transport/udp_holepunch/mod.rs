@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -673,6 +673,38 @@ async fn udp_holepunch_receive_loop(
     }
 }
 
+#[derive(Default)]
+struct RecentOfferDedup {
+    event_ids: HashMap<String, Instant>,
+    sessions: HashMap<(String, String), Instant>,
+}
+
+impl RecentOfferDedup {
+    fn should_skip(&mut self, offer: &crate::holepunch::signaling::IncomingOffer, ttl: Duration) -> bool {
+        let now = Instant::now();
+        self.prune(now, ttl);
+
+        let event_id = offer.event_id.to_hex();
+        if self.event_ids.contains_key(&event_id) {
+            return true;
+        }
+
+        let session_key = (offer.sender_pubkey.to_hex(), offer.offer.session_id.clone());
+        if self.sessions.contains_key(&session_key) {
+            return true;
+        }
+
+        self.event_ids.insert(event_id, now);
+        self.sessions.insert(session_key, now);
+        false
+    }
+
+    fn prune(&mut self, now: Instant, ttl: Duration) {
+        self.event_ids.retain(|_, seen_at| now.duration_since(*seen_at) <= ttl);
+        self.sessions.retain(|_, seen_at| now.duration_since(*seen_at) <= ttl);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inbound responder worker
 // ---------------------------------------------------------------------------
@@ -732,6 +764,8 @@ async fn run_responder_worker(
         subs = subscriptions.len(),
         "udp_holepunch responder: listening for offers"
     );
+    let mut recent_offers = RecentOfferDedup::default();
+    let offer_dedup_ttl = hp_config.signal_timeout + hp_config.punch_timeout;
 
     // Accept loop -- handle offers one at a time.
     loop {
@@ -743,9 +777,21 @@ async fn run_responder_worker(
             }
         };
 
+        if recent_offers.should_skip(&offer, offer_dedup_ttl) {
+            debug!(
+                transport_id = %transport_id,
+                sender = %offer.sender_pubkey,
+                session_id = %offer.offer.session_id,
+                event_id = %offer.event_id,
+                "udp_holepunch responder: ignoring duplicate offer"
+            );
+            continue;
+        }
+
         info!(
             transport_id = %transport_id,
             sender = %offer.sender_pubkey,
+            event_id = %offer.event_id,
             session_id = %offer.offer.session_id,
             "udp_holepunch responder: received offer, starting punch"
         );
@@ -939,5 +985,54 @@ mod tests {
         );
 
         transport.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn recent_offer_dedup_filters_duplicate_event_and_session() {
+        let mut dedup = RecentOfferDedup::default();
+        let ttl = Duration::from_secs(30);
+        let sender = PublicKey::parse(
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        )
+        .unwrap();
+
+        let offer = crate::holepunch::signaling::IncomingOffer {
+            sender_pubkey: sender,
+            event_id: EventId::parse(
+                "0000000000000000000000000000000000000000000000000000000000000101",
+            )
+            .unwrap(),
+            offer: crate::holepunch::signaling::Offer {
+                session_id: "session-1".into(),
+                reflexive_addr: "1.2.3.4:1111".parse().unwrap(),
+                local_addr: "10.0.0.2:1111".parse().unwrap(),
+                stun_server: "stun.example.com:3478".into(),
+                timestamp: 1,
+            },
+        };
+        assert!(!dedup.should_skip(&offer, ttl));
+        assert!(dedup.should_skip(&offer, ttl));
+
+        let same_session_new_event = crate::holepunch::signaling::IncomingOffer {
+            event_id: EventId::parse(
+                "0000000000000000000000000000000000000000000000000000000000000102",
+            )
+            .unwrap(),
+            ..offer.clone()
+        };
+        assert!(dedup.should_skip(&same_session_new_event, ttl));
+
+        let different_session = crate::holepunch::signaling::IncomingOffer {
+            event_id: EventId::parse(
+                "0000000000000000000000000000000000000000000000000000000000000103",
+            )
+            .unwrap(),
+            offer: crate::holepunch::signaling::Offer {
+                session_id: "session-2".into(),
+                ..offer.offer.clone()
+            },
+            ..offer
+        };
+        assert!(!dedup.should_skip(&different_session, ttl));
     }
 }

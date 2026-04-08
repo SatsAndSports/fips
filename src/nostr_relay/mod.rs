@@ -16,11 +16,14 @@ pub enum NostrError {
     #[error("WebSocket error: {0}")]
     WebSocket(String),
 
-    #[error("relay rejected event: {0}")]
-    Rejected(String),
+    #[error("relay {relay} rejected event: {message}")]
+    Rejected { relay: String, message: String },
 
-    #[error("connection closed")]
+    #[error("relay connection closed")]
     ConnectionClosed,
+
+    #[error("relay {0} connection closed")]
+    ConnectionClosedAt(String),
 
     #[error("timeout waiting for EOSE")]
     EoseTimeout,
@@ -30,6 +33,19 @@ pub enum NostrError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl NostrError {
+    pub fn with_relay(self, relay: &str) -> Self {
+        match self {
+            Self::Rejected { message, .. } => Self::Rejected {
+                relay: relay.to_string(),
+                message,
+            },
+            Self::ConnectionClosed => Self::ConnectionClosedAt(relay.to_string()),
+            other => other,
+        }
+    }
 }
 
 /// Initialize tracing for tests. Safe to call multiple times — only the

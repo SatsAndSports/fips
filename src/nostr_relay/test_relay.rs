@@ -26,19 +26,32 @@ pub struct TestRelay {
 /// Shared state across all connections.
 struct RelayState {
     events: Vec<Event>,
+    reject_events: Option<String>,
 }
 
 impl TestRelay {
     /// Start a test relay on a random localhost port.
     /// Returns the relay with its WebSocket URL (e.g., "ws://127.0.0.1:12345").
     pub async fn start() -> Self {
+        Self::start_with_rejection(None).await
+    }
+
+    /// Start a test relay that rejects all EVENT publishes with the given message.
+    pub async fn start_rejecting_events(message: &str) -> Self {
+        Self::start_with_rejection(Some(message.to_string())).await
+    }
+
+    async fn start_with_rejection(reject_events: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("failed to bind test relay");
         let port = listener.local_addr().unwrap().port();
         let url = format!("ws://127.0.0.1:{port}");
 
-        let state = Arc::new(RwLock::new(RelayState { events: Vec::new() }));
+        let state = Arc::new(RwLock::new(RelayState {
+            events: Vec::new(),
+            reject_events,
+        }));
         let connections = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let (broadcast_tx, _) = broadcast::channel::<Event>(256);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -217,6 +230,20 @@ impl TestRelay {
                 let event = event.into_owned();
                 let event_id = event.id;
                 trace!("test relay: EVENT {event_id}");
+
+                let reject_message = {
+                    let s = state.read().await;
+                    s.reject_events.clone()
+                };
+                if let Some(message) = reject_message {
+                    let ok = RelayMessage::Ok {
+                        event_id,
+                        status: false,
+                        message: message.into(),
+                    };
+                    let _ = out_tx.send(ok.as_json()).await;
+                    return;
+                }
 
                 let kind_u16 = event.kind.as_u16();
                 let is_ephemeral = (20000..30000).contains(&kind_u16);

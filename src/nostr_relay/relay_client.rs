@@ -14,6 +14,8 @@ use tracing::{debug, trace, warn};
 
 /// A connection to a single Nostr relay.
 pub struct RelayClient {
+    /// Relay WebSocket URL.
+    url: String,
     /// Channel for outgoing WebSocket messages.
     write_tx: mpsc::Sender<String>,
     /// Active subscriptions, keyed by subscription ID.
@@ -35,6 +37,7 @@ struct SubscriptionSender {
 /// A live subscription that receives events matching its filter.
 pub struct Subscription {
     id: SubscriptionId,
+    relay_url: String,
     event_rx: mpsc::Receiver<Event>,
     eose_rx: Option<oneshot::Receiver<()>>,
     write_tx: mpsc::Sender<String>,
@@ -60,6 +63,7 @@ impl RelayClient {
             Arc::new(Mutex::new(HashMap::new()));
         let pending_oks: Arc<Mutex<HashMap<EventId, oneshot::Sender<(bool, String)>>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let relay_url = url.to_string();
 
         // Writer task: drains the channel and sends to WebSocket.
         let writer_subs = subscriptions.clone();
@@ -81,18 +85,19 @@ impl RelayClient {
         // Reader task: receives WebSocket messages and routes them.
         let subs_clone = subscriptions.clone();
         let oks_clone = pending_oks.clone();
+        let reader_url = relay_url.clone();
         let reader = tokio::spawn(async move {
             while let Some(msg) = ws_read.next().await {
                 match msg {
                     Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                        Self::handle_relay_message(&text, &subs_clone, &oks_clone).await;
+                        Self::handle_relay_message(&reader_url, &text, &subs_clone, &oks_clone).await;
                     }
                     Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                        debug!("relay connection closed by server");
+                        debug!(relay = %reader_url, "relay connection closed by server");
                         break;
                     }
                     Err(e) => {
-                        debug!("relay WebSocket read error: {e}");
+                        debug!(relay = %reader_url, error = %e, "relay WebSocket read error");
                         break;
                     }
                     _ => {} // ping, pong, binary
@@ -105,6 +110,7 @@ impl RelayClient {
         debug!("connected to relay at {url}");
 
         Ok(Self {
+            url: relay_url,
             write_tx,
             subscriptions,
             pending_oks,
@@ -113,10 +119,15 @@ impl RelayClient {
         })
     }
 
+    /// Relay WebSocket URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
     /// Publish a signed event to the relay. Waits for the OK response.
     pub async fn publish(&self, event: Event) -> Result<(), NostrError> {
         let event_id = event.id;
-        trace!("publishing event {event_id}");
+        trace!(relay = %self.url, event_id = %event_id, "publishing event");
 
         // Register for the OK response before sending.
         let (ok_tx, ok_rx) = oneshot::channel();
@@ -130,16 +141,27 @@ impl RelayClient {
         self.write_tx
             .send(msg.as_json())
             .await
-            .map_err(|_| NostrError::ConnectionClosed)?;
+            .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?;
 
         // Wait for the OK response.
-        let (accepted, message) = ok_rx.await.map_err(|_| NostrError::ConnectionClosed)?;
+        let (accepted, message) = ok_rx
+            .await
+            .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?;
 
         if accepted {
-            trace!("event {event_id} accepted");
+            debug!(relay = %self.url, event_id = %event_id, "relay accepted event");
             Ok(())
         } else {
-            Err(NostrError::Rejected(message))
+            debug!(
+                relay = %self.url,
+                event_id = %event_id,
+                message = %message,
+                "relay rejected event"
+            );
+            Err(NostrError::Rejected {
+                relay: self.url.clone(),
+                message,
+            })
         }
     }
 
@@ -171,10 +193,11 @@ impl RelayClient {
         self.write_tx
             .send(msg.as_json())
             .await
-            .map_err(|_| NostrError::ConnectionClosed)?;
+            .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?;
 
         Ok(Subscription {
             id: sub_id,
+            relay_url: self.url.clone(),
             event_rx,
             eose_rx: Some(eose_rx),
             write_tx: self.write_tx.clone(),
@@ -189,6 +212,7 @@ impl RelayClient {
 
     /// Route an incoming relay message to the right waiter.
     async fn handle_relay_message(
+        relay_url: &str,
         text: &str,
         subscriptions: &Arc<Mutex<HashMap<SubscriptionId, SubscriptionSender>>>,
         pending_oks: &Arc<Mutex<HashMap<EventId, oneshot::Sender<(bool, String)>>>>,
@@ -196,7 +220,7 @@ impl RelayClient {
         let msg = match RelayMessage::from_json(text) {
             Ok(msg) => msg,
             Err(e) => {
-                warn!("invalid relay message: {e}");
+                warn!(relay = %relay_url, error = %e, "invalid relay message");
                 return;
             }
         };
@@ -206,7 +230,7 @@ impl RelayClient {
                 subscription_id,
                 event,
             } => {
-                trace!("received EVENT for subscription {subscription_id}");
+                trace!(relay = %relay_url, subscription_id = %subscription_id, event_id = %event.id, "received EVENT for subscription");
                 let subs = subscriptions.lock().await;
                 if let Some(sub) = subs.get(&subscription_id) {
                     let _ = sub.event_tx.send(event.into_owned()).await;
@@ -217,14 +241,14 @@ impl RelayClient {
                 status,
                 message,
             } => {
-                trace!("received OK for event {event_id}: status={status}");
+                trace!(relay = %relay_url, event_id = %event_id, status = status, "received OK for event");
                 let mut oks = pending_oks.lock().await;
                 if let Some(tx) = oks.remove(&event_id) {
                     let _ = tx.send((status, message.to_string()));
                 }
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
-                trace!("received EOSE for subscription {sub_id}");
+                trace!(relay = %relay_url, subscription_id = %sub_id, "received EOSE for subscription");
                 let mut subs = subscriptions.lock().await;
                 if let Some(sub) = subs.get_mut(&sub_id) {
                     if let Some(eose_tx) = sub.eose_tx.take() {
@@ -233,7 +257,7 @@ impl RelayClient {
                 }
             }
             RelayMessage::Notice(message) => {
-                debug!("relay notice: {message}");
+                debug!(relay = %relay_url, message = %message, "relay notice");
             }
             _ => {
                 trace!("ignoring unhandled relay message");
@@ -261,10 +285,20 @@ impl Subscription {
         &self.id
     }
 
+    /// The relay URL backing this subscription.
+    pub fn relay_url(&self) -> &str {
+        &self.relay_url
+    }
+
     /// Wait for the next event. Returns `None` if the subscription
     /// or connection is closed.
     pub async fn next(&mut self) -> Option<Event> {
         self.event_rx.recv().await
+    }
+
+    /// Wait for the next event and include which relay delivered it.
+    pub async fn next_with_source(&mut self) -> Option<(String, Event)> {
+        self.next().await.map(|event| (self.relay_url.clone(), event))
     }
 
     /// Wait for EOSE (End of Stored Events), indicating the relay has
@@ -272,7 +306,8 @@ impl Subscription {
     /// live events will arrive via [`next()`](Self::next).
     pub async fn wait_for_eose(&mut self) -> Result<(), NostrError> {
         if let Some(rx) = self.eose_rx.take() {
-            rx.await.map_err(|_| NostrError::ConnectionClosed)
+            rx.await
+                .map_err(|_| NostrError::ConnectionClosedAt(self.relay_url.clone()))
         } else {
             Ok(()) // already received
         }
@@ -284,7 +319,7 @@ impl Subscription {
         self.write_tx
             .send(msg.as_json())
             .await
-            .map_err(|_| NostrError::ConnectionClosed)
+            .map_err(|_| NostrError::ConnectionClosedAt(self.relay_url.clone()))
     }
 }
 
@@ -314,6 +349,7 @@ mod tests {
         // Subscribe with a matching filter.
         let filter = Filter::new().kind(Kind::TextNote).author(keys.public_key());
         let mut sub = client.subscribe(vec![filter]).await.unwrap();
+        assert_eq!(sub.relay_url(), relay.url());
         sub.wait_for_eose().await.unwrap();
 
         // Should receive the stored event.
@@ -326,6 +362,38 @@ mod tests {
 
         sub.close().await.unwrap();
         client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_subscription_reports_source() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let subscriber = RelayClient::connect(relay.url()).await.unwrap();
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        let filter = Filter::new().kind(Kind::TextNote).author(keys.public_key());
+        let mut sub = subscriber.subscribe(vec![filter]).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        let event = EventBuilder::new(Kind::TextNote, "hello source")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let event_id = event.id;
+        publisher.publish(event).await.unwrap();
+
+        let (relay_url, received) = timeout(Duration::from_secs(2), sub.next_with_source())
+            .await
+            .expect("timed out")
+            .expect("closed");
+        assert_eq!(relay_url, relay.url());
+        assert_eq!(received.id, event_id);
+
+        sub.close().await.unwrap();
+        subscriber.disconnect().await;
+        publisher.disconnect().await;
         relay.shutdown().await;
     }
 

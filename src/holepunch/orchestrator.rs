@@ -70,7 +70,7 @@ pub async fn subscribe_signals_all(
         match subscribe_signals(relay, &my_pubkey).await {
             Ok(sub) => subscriptions.push(sub),
             Err(err) => {
-                warn!(error = %err, "failed to subscribe for signals on one relay");
+                warn!(relay = %relay.url(), error = %err, "failed to subscribe for signals on relay");
                 last_err = Some(err);
             }
         }
@@ -108,9 +108,9 @@ pub async fn wait_for_first_signal(
 
         let mut any_open = false;
         for sub in subscriptions.iter_mut() {
-            match timeout(poll_step, sub.next()).await {
-                Ok(Some(event)) => {
-                    debug!(event_id = %event.id, author = %event.pubkey, "received signal event");
+            match timeout(poll_step, sub.next_with_source()).await {
+                Ok(Some((relay, event))) => {
+                    debug!(relay = %relay, event_id = %event.id, author = %event.pubkey, "received signal event");
                     return Ok(event);
                 }
                 Ok(None) => continue,

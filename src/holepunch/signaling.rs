@@ -126,11 +126,7 @@ pub async fn publish_service_advertisement(
         event.id, event.pubkey
     );
 
-    for relay in relays {
-        relay.publish(event.clone()).await?;
-    }
-
-    Ok(event)
+    publish_event_all(relays, event, "service advertisement").await
 }
 
 /// Discover a responder's service advertisement (kind 30078).
@@ -143,7 +139,7 @@ pub async fn discover_service(
 ) -> Result<Option<Event>, NostrError> {
     let filter = service_advertisement_filter().author(*responder_pubkey);
 
-    debug!("discovering service for {responder_pubkey}");
+    debug!(relay = %client.url(), "discovering service for {responder_pubkey}");
 
     let mut sub = client.subscribe(vec![filter]).await?;
     sub.wait_for_eose().await?;
@@ -159,9 +155,9 @@ pub async fn discover_service(
     sub.close().await?;
 
     if let Some(ref e) = event {
-        debug!("discovered service advertisement: event_id={}", e.id);
+        debug!(relay = %client.url(), event_id = %e.id, "discovered service advertisement");
     } else {
-        debug!("no service advertisement found for {responder_pubkey}");
+        debug!(relay = %client.url(), "no service advertisement found for {responder_pubkey}");
     }
 
     Ok(event)
@@ -194,7 +190,7 @@ pub async fn discover_service_across_relays(
         match discover_service_typed(relay, responder_pubkey).await {
             Ok(Some(advertisement)) => return Ok(advertisement),
             Ok(None) => continue,
-            Err(e) => warn!(error = %e, "service discovery failed on one relay"),
+            Err(e) => warn!(relay = %relay.url(), error = %e, "service discovery failed on relay"),
         }
     }
 
@@ -212,7 +208,7 @@ pub async fn subscribe_signals(
         .kind(Kind::Custom(SIGNAL_KIND))
         .pubkey(*my_pubkey);
 
-    debug!("subscribing for signals addressed to {my_pubkey}");
+    debug!(relay = %client.url(), "subscribing for signals addressed to {my_pubkey}");
     let mut sub = client.subscribe(vec![filter]).await?;
     sub.wait_for_eose().await?;
     Ok(sub)
@@ -228,6 +224,7 @@ pub async fn send_offer(
     let event = build_offer_event(keys, responder_pubkey, offer)?;
 
     debug!(
+        relay = %client.url(),
         "sending offer: session_id={}, event_id={}",
         offer.session_id, event.id
     );
@@ -252,11 +249,7 @@ pub async fn send_offer_all(
         event.id
     );
 
-    for relay in relays {
-        relay.publish(event.clone()).await?;
-    }
-
-    Ok(event)
+    publish_event_all(relays, event, "offer").await
 }
 
 /// Send an answer to the initiator (kind 21059).
@@ -269,6 +262,7 @@ pub async fn send_answer(
     let event = build_answer_event(keys, initiator_pubkey, answer)?;
 
     debug!(
+        relay = %client.url(),
         "sending answer: session_id={}, event_id={}",
         answer.session_id, event.id
     );
@@ -293,11 +287,57 @@ pub async fn send_answer_all(
         event.id
     );
 
-    for relay in relays {
-        relay.publish(event.clone()).await?;
+    publish_event_all(relays, event, "answer").await
+}
+
+async fn publish_event_all(
+    relays: &[&RelayClient],
+    event: Event,
+    event_type: &str,
+) -> Result<Event, NostrError> {
+    if relays.is_empty() {
+        return Err(NostrError::InvalidEvent(format!(
+            "no relays configured for {event_type} publish"
+        )));
     }
 
-    Ok(event)
+    let mut accepted = 0usize;
+    let mut failures = Vec::new();
+
+    for relay in relays {
+        match relay.publish(event.clone()).await {
+            Ok(()) => {
+                accepted += 1;
+            }
+            Err(err) => {
+                warn!(
+                    relay = %relay.url(),
+                    event_id = %event.id,
+                    event_type,
+                    error = %err,
+                    "relay publish failed"
+                );
+                failures.push(format!("{}: {}", relay.url(), err));
+            }
+        }
+    }
+
+    if accepted > 0 {
+        debug!(
+            event_type,
+            event_id = %event.id,
+            accepted,
+            total = relays.len(),
+            failed = failures.len(),
+            "published event to relays"
+        );
+        Ok(event)
+    } else {
+        Err(NostrError::Rejected {
+            relay: "all relays".into(),
+            message: failures.join("; "),
+        })
+    }
 }
 
 /// Parse a typed inbound offer from an incoming event.
@@ -513,6 +553,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn publish_service_advertisement_succeeds_if_one_relay_accepts() {
+        init_test_logging();
+
+        let accepting = TestRelay::start().await;
+        let rejecting = TestRelay::start_rejecting_events("rate-limited").await;
+        let accepting_client = RelayClient::connect(accepting.url()).await.unwrap();
+        let rejecting_client = RelayClient::connect(rejecting.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+
+        let event = publish_service_advertisement(
+            &[&accepting_client, &rejecting_client],
+            &responder_keys,
+            &["stun.example.com:3478"],
+        )
+        .await
+        .unwrap();
+
+        let discovered = discover_service_typed(&accepting_client, &responder_keys.public_key())
+            .await
+            .unwrap();
+        assert!(discovered.is_some());
+        assert_eq!(event.kind, Kind::Custom(SERVICE_AD_KIND));
+
+        accepting_client.disconnect().await;
+        rejecting_client.disconnect().await;
+        accepting.shutdown().await;
+        rejecting.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn offer_answer_exchange() {
         init_test_logging();
 
@@ -601,5 +671,71 @@ mod tests {
         initiator_client.disconnect().await;
         responder_client.disconnect().await;
         relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_offer_all_succeeds_if_one_relay_accepts() {
+        init_test_logging();
+
+        let accepting = TestRelay::start().await;
+        let rejecting = TestRelay::start_rejecting_events("rate-limited").await;
+        let accepting_client = RelayClient::connect(accepting.url()).await.unwrap();
+        let rejecting_client = RelayClient::connect(rejecting.url()).await.unwrap();
+
+        let initiator_keys = Keys::generate();
+        let responder_keys = Keys::generate();
+        let offer = make_offer("offer-partial-success");
+
+        let event = send_offer_all(
+            &[&accepting_client, &rejecting_client],
+            &initiator_keys,
+            &responder_keys.public_key(),
+            &offer,
+        )
+        .await
+        .unwrap();
+
+        let discovered = discover_service_typed(&accepting_client, &responder_keys.public_key())
+            .await
+            .unwrap();
+        assert!(discovered.is_none(), "offer is ephemeral and should not be stored");
+        assert_eq!(event.kind, Kind::Custom(SIGNAL_KIND));
+
+        accepting_client.disconnect().await;
+        rejecting_client.disconnect().await;
+        accepting.shutdown().await;
+        rejecting.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_answer_all_fails_if_all_relays_reject() {
+        init_test_logging();
+
+        let reject_a = TestRelay::start_rejecting_events("rate-limited-a").await;
+        let reject_b = TestRelay::start_rejecting_events("rate-limited-b").await;
+        let client_a = RelayClient::connect(reject_a.url()).await.unwrap();
+        let client_b = RelayClient::connect(reject_b.url()).await.unwrap();
+
+        let responder_keys = Keys::generate();
+        let initiator_keys = Keys::generate();
+        let answer = make_answer("answer-all-reject");
+
+        let err = send_answer_all(
+            &[&client_a, &client_b],
+            &responder_keys,
+            &initiator_keys.public_key(),
+            &answer,
+        )
+        .await
+        .unwrap_err();
+
+        let text = err.to_string();
+        assert!(text.contains(reject_a.url()));
+        assert!(text.contains(reject_b.url()));
+
+        client_a.disconnect().await;
+        client_b.disconnect().await;
+        reject_a.shutdown().await;
+        reject_b.shutdown().await;
     }
 }
