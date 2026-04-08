@@ -214,6 +214,18 @@ impl Node {
                         .session_established_at()
                         .elapsed()
                         .as_secs();
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        sender_index = %header.sender_idx,
+                        session_age_secs,
+                        rekey_in_progress = existing_peer.rekey_in_progress(),
+                        pending_new_session = existing_peer.pending_new_session().is_some(),
+                        has_session = existing_peer.has_session(),
+                        possible_restart,
+                        "Received msg1 for active peer; classifying as duplicate/restart/rekey"
+                    );
                     if self.config.node.rekey.enabled
                         && existing_peer.has_session()
                         && existing_peer.is_healthy()
@@ -225,6 +237,8 @@ impl Node {
                         if existing_peer.pending_new_session().is_some() {
                             debug!(
                                 peer = %self.peer_display_name(&peer_node_addr),
+                                transport_id = %packet.transport_id,
+                                remote_addr = %packet.remote_addr,
                                 "Rekey msg1 received but already have pending session, dropping"
                             );
                             self.connections.remove(&link_id);
@@ -244,6 +258,8 @@ impl Node {
                                 // as our responder.
                                 debug!(
                                     peer = %self.peer_display_name(&peer_node_addr),
+                                    transport_id = %packet.transport_id,
+                                    remote_addr = %packet.remote_addr,
                                     "Dual rekey initiation: we win (smaller addr), dropping their msg1"
                                 );
                                 self.connections.remove(&link_id);
@@ -254,6 +270,8 @@ impl Node {
                             // We lose — abandon our rekey, become responder below.
                             debug!(
                                 peer = %self.peer_display_name(&peer_node_addr),
+                                transport_id = %packet.transport_id,
+                                remote_addr = %packet.remote_addr,
                                 "Dual rekey initiation: we lose (larger addr), abandoning ours"
                             );
                             if let Some(peer) = self.peers.get_mut(&peer_node_addr)
@@ -296,13 +314,20 @@ impl Node {
                                 Ok(_) => {
                                     debug!(
                                         peer = %self.peer_display_name(&peer_node_addr),
+                                        transport_id = %packet.transport_id,
+                                        remote_addr = %packet.remote_addr,
                                         new_our_index = %our_new_index,
+                                        their_index = %header.sender_idx,
                                         "Sent rekey msg2 response"
                                     );
                                 }
                                 Err(e) => {
                                     warn!(
                                         peer = %self.peer_display_name(&peer_node_addr),
+                                        transport_id = %packet.transport_id,
+                                        remote_addr = %packet.remote_addr,
+                                        new_our_index = %our_new_index,
+                                        their_index = %header.sender_idx,
                                         error = %e,
                                         "Failed to send rekey msg2"
                                     );
@@ -339,6 +364,14 @@ impl Node {
                         self.msg1_rate_limiter.complete_handshake();
                         return;
                     }
+
+                    debug!(
+                        peer = %self.peer_display_name(&peer_node_addr),
+                        transport_id = %packet.transport_id,
+                        remote_addr = %packet.remote_addr,
+                        session_age_secs,
+                        "Same-epoch msg1 classified as duplicate initial handshake, attempting msg2 resend"
+                    );
 
                     // Not a rekey — duplicate msg1. Resend stored msg2.
                     if let Some(msg2) = existing_peer.handshake_msg2().map(|m| m.to_vec())
@@ -582,6 +615,15 @@ impl Node {
             if let Some(peer_node_addr) = peer_addr {
                 let display_name = self.peer_display_name(&peer_node_addr);
 
+                debug!(
+                    peer = %display_name,
+                    transport_id = %packet.transport_id,
+                    remote_addr = %packet.remote_addr,
+                    rekey_receiver_index = %header.receiver_idx,
+                    rekey_sender_index = %header.sender_idx,
+                    "Received rekey msg2 for pending outbound rekey"
+                );
+
                 // Complete the rekey handshake on the ActivePeer
                 if let Some(peer) = self.peers.get_mut(&peer_node_addr) {
                     match peer.complete_rekey_msg2(noise_msg2) {
@@ -599,6 +641,8 @@ impl Node {
 
                             debug!(
                                 peer = %display_name,
+                                transport_id = %packet.transport_id,
+                                remote_addr = %packet.remote_addr,
                                 new_our_index = %our_index,
                                 new_their_index = %header.sender_idx,
                                 "Rekey completed (initiator), pending K-bit cutover"
@@ -607,6 +651,10 @@ impl Node {
                         Err(e) => {
                             warn!(
                                 peer = %display_name,
+                                transport_id = %packet.transport_id,
+                                remote_addr = %packet.remote_addr,
+                                rekey_receiver_index = %header.receiver_idx,
+                                rekey_sender_index = %header.sender_idx,
                                 error = %e,
                                 "Rekey msg2 processing failed"
                             );
