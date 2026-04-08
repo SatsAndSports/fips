@@ -121,8 +121,11 @@ pub async fn publish_service_advertisement(
     let mut builder =
         EventBuilder::new(Kind::Custom(SERVICE_AD_KIND), "").tag(Tag::identifier(FIPS_SERVICE_TAG));
 
-    for stun in stun_servers {
-        builder = builder.tag(Tag::custom(TagKind::custom("stun"), [*stun]));
+    if !stun_servers.is_empty() {
+        builder = builder.tag(Tag::custom(
+            TagKind::custom("stun"),
+            stun_servers.iter().copied(),
+        ));
     }
 
     if !relay_urls.is_empty() {
@@ -409,15 +412,22 @@ pub fn parse_service_advertisement(event: &Event) -> Result<ServiceAdvertisement
 
 /// Extract STUN server addresses from a service advertisement event.
 ///
-/// Returns the values of all `stun` tags in the event. The initiator
-/// picks one to query for its reflexive address.
+/// The `stun` tag is a single tag with multiple values:
+/// `["stun", "server1:3478", "server2:3478"]`. Returns all values
+/// after the tag name.
 pub fn extract_stun_servers(event: &Event) -> Vec<String> {
     event
         .tags
         .iter()
-        .filter(|t| t.kind() == TagKind::custom("stun"))
-        .filter_map(|t| t.content().map(|s| s.to_string()))
-        .collect()
+        .find(|t| t.kind() == TagKind::custom("stun"))
+        .map(|t| {
+            t.as_slice()
+                .iter()
+                .skip(1) // skip the tag name "stun"
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Extract relay URLs from a service advertisement event.
