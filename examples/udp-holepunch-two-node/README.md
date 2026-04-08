@@ -7,18 +7,16 @@ This example is split into two folders:
 - `responder/` - publishes a Nostr advertisement and accepts inbound offers
 - `initiator/` - discovers advertisements and auto-connects
 
-Both sides use public relays:
+Both sides use a shared private relay:
 
-- `wss://nostr.chaima.info`
-- `wss://relay.primal.net`
-- `wss://nos.lol`
-- `wss://relay.damus.io`
+- `ws://80.78.18.182:7777`
 
 ## Important Caveats
 
 - This is a manual smoke test, not a CI-backed end-to-end node test.
-- The initiator uses `auto_connect: true`, so on public relays it may discover
-  and attempt to connect to other public `udp_holepunch` advertisements too.
+- The initiator uses `auto_connect: true`, so if you later switch back to
+  public relays it may discover and attempt to connect to unrelated public
+  `udp_holepunch` advertisements too.
 - Run this with Docker host networking on Linux. Docker bridge NAT adds another
   translation layer and makes hole-punch behaviour harder to interpret.
 

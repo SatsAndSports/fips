@@ -14,10 +14,7 @@ transports:
     main:
       bind_ip: "0.0.0.0"
       relays:
-        - "wss://nostr.chaima.info"
-        - "wss://relay.primal.net"
-        - "wss://nos.lol"
-        - "wss://relay.damus.io"
+        - "ws://80.78.18.182:7777"
       stun_servers:
         - "stun.l.google.com:19302"
         - "stun.cloudflare.com:3478"
