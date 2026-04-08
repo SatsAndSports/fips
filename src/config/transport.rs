@@ -28,6 +28,9 @@ const DEFAULT_UDP_HOLEPUNCH_PROBE_MS: u64 = 200;
 /// Default hole-punch timeout in seconds.
 const DEFAULT_UDP_HOLEPUNCH_TIMEOUT_SECS: u64 = 10;
 
+/// Default advertisement expiration TTL in seconds (1 hour).
+const DEFAULT_UDP_HOLEPUNCH_AD_EXPIRATION_SECS: u64 = 3600;
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +105,10 @@ pub struct UdpHolePunchConfig {
     /// Accept inbound hole-punch offers. Default: false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_connections: Option<bool>,
+
+    /// Advertisement expiration TTL in seconds. Default: 3600 (1 hour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_expiration_secs: Option<u64>,
 }
 
 impl UdpHolePunchConfig {
@@ -131,6 +138,12 @@ impl UdpHolePunchConfig {
     /// Whether to accept inbound hole-punch offers. Default: false.
     pub fn accept_connections(&self) -> bool {
         self.accept_connections.unwrap_or(false)
+    }
+
+    /// Get the advertisement expiration TTL in seconds. Default: 3600 (1 hour).
+    pub fn ad_expiration_secs(&self) -> u64 {
+        self.ad_expiration_secs
+            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_AD_EXPIRATION_SECS)
     }
 }
 

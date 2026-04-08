@@ -93,6 +93,8 @@ pub struct ServiceAdvertisement {
     pub peer_pubkey: PublicKey,
     /// STUN servers advertised by the responder.
     pub stun_servers: Vec<String>,
+    /// Relay URLs where the responder listens for signaling messages.
+    pub relays: Vec<String>,
     /// Signed Nostr creation timestamp.
     pub created_at: Timestamp,
     /// The Nostr event ID of the advertisement.
@@ -104,17 +106,34 @@ pub struct ServiceAdvertisement {
 /// Call this **after** [`subscribe_signals`] to avoid a race where an
 /// initiator sends an offer before the responder is listening.
 ///
+/// `relay_urls` are embedded in a `relays` tag so the initiator knows
+/// where to send signaling messages. `expiration` sets a NIP-40
+/// expiration timestamp for automatic garbage collection by relays.
+///
 /// Returns the published event (useful for later deletion).
 pub async fn publish_service_advertisement(
     relays: &[&RelayClient],
     keys: &Keys,
     stun_servers: &[&str],
+    relay_urls: &[&str],
+    expiration: Option<Timestamp>,
 ) -> Result<Event, NostrError> {
     let mut builder =
         EventBuilder::new(Kind::Custom(SERVICE_AD_KIND), "").tag(Tag::identifier(FIPS_SERVICE_TAG));
 
     for stun in stun_servers {
         builder = builder.tag(Tag::custom(TagKind::custom("stun"), [*stun]));
+    }
+
+    if !relay_urls.is_empty() {
+        builder = builder.tag(Tag::custom(
+            TagKind::custom("relays"),
+            relay_urls.iter().copied(),
+        ));
+    }
+
+    if let Some(expiration) = expiration {
+        builder = builder.tag(Tag::expiration(expiration));
     }
 
     let event = builder
@@ -382,6 +401,7 @@ pub fn parse_service_advertisement(event: &Event) -> Result<ServiceAdvertisement
     Ok(ServiceAdvertisement {
         peer_pubkey: event.pubkey,
         stun_servers: extract_stun_servers(event),
+        relays: extract_relays(event),
         created_at: event.created_at,
         event_id: event.id,
     })
@@ -398,6 +418,26 @@ pub fn extract_stun_servers(event: &Event) -> Vec<String> {
         .filter(|t| t.kind() == TagKind::custom("stun"))
         .filter_map(|t| t.content().map(|s| s.to_string()))
         .collect()
+}
+
+/// Extract relay URLs from a service advertisement event.
+///
+/// The `relays` tag is a single tag with multiple values:
+/// `["relays", "wss://relay1", "wss://relay2"]`. Returns all values
+/// after the tag name.
+fn extract_relays(event: &Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .find(|t| t.kind() == TagKind::custom("relays"))
+        .map(|t| {
+            t.as_slice()
+                .iter()
+                .skip(1) // skip the tag name "relays"
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn build_offer_event(
@@ -534,9 +574,15 @@ mod tests {
         let responder_keys = Keys::generate();
 
         // Publish a service advertisement.
-        publish_service_advertisement(&[&client], &responder_keys, &["stun.example.com:3478"])
-            .await
-            .unwrap();
+        publish_service_advertisement(
+            &[&client],
+            &responder_keys,
+            &["stun.example.com:3478"],
+            &["wss://relay1.example.com", "wss://relay2.example.com"],
+            None,
+        )
+        .await
+        .unwrap();
 
         // Discover it from the same relay.
         let discovered = discover_service_typed(&client, &responder_keys.public_key())
@@ -547,6 +593,13 @@ mod tests {
         let ad = discovered.unwrap();
         assert_eq!(ad.peer_pubkey, responder_keys.public_key());
         assert_eq!(ad.stun_servers, vec!["stun.example.com:3478".to_string()]);
+        assert_eq!(
+            ad.relays,
+            vec![
+                "wss://relay1.example.com".to_string(),
+                "wss://relay2.example.com".to_string(),
+            ]
+        );
 
         client.disconnect().await;
         relay.shutdown().await;
@@ -566,6 +619,8 @@ mod tests {
             &[&accepting_client, &rejecting_client],
             &responder_keys,
             &["stun.example.com:3478"],
+            &[],
+            None,
         )
         .await
         .unwrap();
@@ -606,6 +661,8 @@ mod tests {
             &[&responder_client],
             &responder_keys,
             &["stun.example.com:3478"],
+            &[],
+            None,
         )
         .await
         .unwrap();

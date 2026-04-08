@@ -381,7 +381,7 @@ impl UdpHolePunchTransport {
         let transport_id = self.transport_id;
         let addr = addr.clone();
         let bind_ip = self.config.bind_ip().to_string();
-        let relay_urls = self.config.relays.clone();
+        let relay_urls = relay_urls_for_outbound(&self.config.relays, &advertisement.relays);
         let hp_config = self.hole_punch_config();
         let packet_tx = self.packet_tx.clone();
 
@@ -596,6 +596,23 @@ async fn run_discovery_worker(
 }
 
 // ---------------------------------------------------------------------------
+// Relay URL selection for outbound punches
+// ---------------------------------------------------------------------------
+
+/// Choose relay URLs for an outbound punch.
+///
+/// Prefers the relays advertised by the responder (from the service
+/// advertisement's `relays` tag). Falls back to the local config relays
+/// only if the advertisement doesn't specify any.
+fn relay_urls_for_outbound(config_relays: &[String], ad_relays: &[String]) -> Vec<String> {
+    if !ad_relays.is_empty() {
+        ad_relays.to_vec()
+    } else {
+        config_relays.to_vec()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Outbound punch (runs in a background task spawned by connect_async)
 // ---------------------------------------------------------------------------
 
@@ -739,7 +756,9 @@ async fn run_responder_worker(
 
     // Publish service advertisement so initiators can discover us.
     let stun_refs: Vec<&str> = config.stun_servers.iter().map(|s| s.as_str()).collect();
-    if let Err(err) = publish_service_advertisement(&relay_refs, &keys, &stun_refs).await {
+    let relay_url_refs: Vec<&str> = config.relays.iter().map(|s| s.as_str()).collect();
+    let expiration = Timestamp::from(Timestamp::now().as_secs() + config.ad_expiration_secs());
+    if let Err(err) = publish_service_advertisement(&relay_refs, &keys, &stun_refs, &relay_url_refs, Some(expiration)).await {
         error!(transport_id = %transport_id, error = %err, "udp_holepunch responder: failed to publish advertisement");
         for relay in relays {
             relay.disconnect().await;
@@ -889,12 +908,14 @@ mod tests {
         let newer = ServiceAdvertisement {
             peer_pubkey: PublicKey::parse("0000000000000000000000000000000000000000000000000000000000000001").unwrap(),
             stun_servers: vec!["stun.new:3478".to_string()],
+            relays: vec![],
             created_at: Timestamp::from(20),
             event_id: EventId::parse("0000000000000000000000000000000000000000000000000000000000000002").unwrap(),
         };
         let older = ServiceAdvertisement {
             peer_pubkey: newer.peer_pubkey,
             stun_servers: vec!["stun.old:3478".to_string()],
+            relays: vec![],
             created_at: Timestamp::from(10),
             event_id: EventId::parse("0000000000000000000000000000000000000000000000000000000000000003").unwrap(),
         };
@@ -920,7 +941,7 @@ mod tests {
         let mut transport = UdpHolePunchTransport::new(TransportId::new(42), None, config, packet_tx);
         transport.start_async().await.unwrap();
 
-        publish_service_advertisement(&[&publisher], &keys, &["stun.example.com:3478"])
+        publish_service_advertisement(&[&publisher], &keys, &["stun.example.com:3478"], &[], None)
             .await
             .unwrap();
 
@@ -955,6 +976,7 @@ mod tests {
         let fake_ad = ServiceAdvertisement {
             peer_pubkey: PublicKey::parse("0000000000000000000000000000000000000000000000000000000000000001").unwrap(),
             stun_servers: vec!["stun.example.com:3478".to_string()],
+            relays: vec![],
             created_at: Timestamp::now(),
             event_id: EventId::parse("0000000000000000000000000000000000000000000000000000000000000099").unwrap(),
         };
@@ -1038,6 +1060,23 @@ mod tests {
         assert!(!dedup.should_skip(&different_session, ttl));
     }
 
+    #[test]
+    fn relay_urls_for_outbound_prefers_advertisement() {
+        let config = vec!["ws://config-relay:1".to_string()];
+        let ad = vec![
+            "ws://ad-relay:1".to_string(),
+            "ws://ad-relay:2".to_string(),
+        ];
+        assert_eq!(relay_urls_for_outbound(&config, &ad), ad);
+    }
+
+    #[test]
+    fn relay_urls_for_outbound_falls_back_to_config() {
+        let config = vec!["ws://config-relay:1".to_string()];
+        let ad: Vec<String> = vec![];
+        assert_eq!(relay_urls_for_outbound(&config, &ad), config);
+    }
+
     /// End-to-end transport integration test.
     ///
     /// Two `UdpHolePunchTransport` instances (initiator + responder) on
@@ -1067,6 +1106,7 @@ mod tests {
             auto_connect: Some(false),
             timeout_secs: Some(5),
             probe_ms: Some(50),
+            ad_expiration_secs: None,
         };
         let (responder_packet_tx, mut responder_packet_rx) =
             crate::transport::packet_channel(64);
@@ -1094,6 +1134,7 @@ mod tests {
             accept_connections: Some(false),
             timeout_secs: Some(5),
             probe_ms: Some(50),
+            ad_expiration_secs: None,
         };
         let (initiator_packet_tx, mut initiator_packet_rx) =
             crate::transport::packet_channel(64);

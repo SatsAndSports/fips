@@ -39,9 +39,15 @@ async fn full_holepunch_localhost() {
             .await
             .unwrap();
 
-    publish_service_advertisement(&[&responder_client], &responder_keys, &[&stun_addr])
-        .await
-        .unwrap();
+    publish_service_advertisement(
+        &[&responder_client],
+        &responder_keys,
+        &[&stun_addr],
+        &[relay.url()],
+        None,
+    )
+    .await
+    .unwrap();
 
     // --- Initiator: discover service ---
     let initiator_client = RelayClient::connect(relay.url()).await.unwrap();

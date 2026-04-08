@@ -228,7 +228,8 @@ async fn run_responder(
         .map_err(|e| e.to_string())?;
 
     let stun_refs: Vec<&str> = args.stun.iter().map(String::as_str).collect();
-    publish_service_advertisement(relays, keys, &stun_refs)
+    let relay_url_refs: Vec<&str> = args.relay.iter().map(String::as_str).collect();
+    publish_service_advertisement(relays, keys, &stun_refs, &relay_url_refs, None)
         .await
         .map_err(|e| format!("failed to publish service advertisement: {e}"))?;
     info!("published service advertisement");
