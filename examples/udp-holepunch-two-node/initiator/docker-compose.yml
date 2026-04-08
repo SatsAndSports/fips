@@ -1,0 +1,13 @@
+services:
+  fips:
+    build:
+      context: ../../..
+      dockerfile: examples/udp-holepunch-two-node/Dockerfile
+    network_mode: host
+    restart: "no"
+    environment:
+      - RUST_LOG=${RUST_LOG:-debug}
+    volumes:
+      - ./fips.yaml:/config/fips.yaml:ro
+      - ./secrets:/config/secrets
+    command: ["fips", "--config", "/config/fips.yaml"]

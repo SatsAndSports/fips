@@ -1,0 +1,5 @@
+target
+.git
+examples/sidecar-nostr-relay/relay-data
+**/*.key
+**/*.pub

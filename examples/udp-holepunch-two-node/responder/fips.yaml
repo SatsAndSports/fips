@@ -1,0 +1,29 @@
+node:
+  identity:
+    nsec: "nsec1REPLACE_ME_RESPONDER"
+  log_level: debug
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp_holepunch:
+    main:
+      bind_ip: "0.0.0.0"
+      relays:
+        - "wss://nostr.chaima.info"
+        - "wss://relay.primal.net"
+        - "wss://nos.lol"
+        - "wss://relay.damus.io"
+      stun_servers:
+        - "stun.l.google.com:19302"
+        - "stun.cloudflare.com:3478"
+      probe_ms: 200
+      timeout_secs: 10
+      auto_connect: false
+      accept_connections: true
+
+peers: []
