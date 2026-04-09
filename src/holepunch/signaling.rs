@@ -46,6 +46,12 @@ const SIGNAL_KIND: u16 = 21059;
 /// Per-relay deadline for waiting on an EVENT `OK` response.
 const RELAY_PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// One-shot advertisement discovery should stay quick even if some relays are slow.
+const DISCOVERY_EOSE_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// After EOSE, drain any already-buffered stored events without lingering.
+const DISCOVERY_DRAIN_IDLE_TIMEOUT: Duration = Duration::from_millis(25);
+
 /// Signal subscriptions only need a short replay window for in-flight events.
 const SIGNAL_SUBSCRIPTION_SINCE_SECS: u64 = 5;
 
@@ -198,8 +204,9 @@ pub async fn publish_service_advertisement_with_ttl(
 
 /// Discover a responder's service advertisement (kind 30078).
 ///
-/// Returns the first matching event. Waits for EOSE (end of stored events)
-/// to ensure we've seen all available advertisements.
+/// Returns the newest non-expired matching event from this relay. Waits for
+/// EOSE (end of stored events) with a short timeout, then drains buffered
+/// stored advertisements without lingering on live updates.
 pub async fn discover_service(
     client: &RelayClient,
     responder_pubkey: &PublicKey,
@@ -209,25 +216,52 @@ pub async fn discover_service(
     debug!(relay = %client.url(), "discovering service for {responder_pubkey}");
 
     let mut sub = client.subscribe(vec![filter]).await?;
-    sub.wait_for_eose().await?;
+    match tokio::time::timeout(DISCOVERY_EOSE_TIMEOUT, sub.wait_for_eose()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            let _ = sub.close().await;
+            return Err(err);
+        }
+        Err(_) => {
+            let _ = sub.close().await;
+            return Err(NostrError::EoseTimeout);
+        }
+    }
 
-    // Try to receive a stored event (should arrive before EOSE).
-    // Use a short timeout since EOSE already arrived — if there's an
-    // event it's already in the channel.
-    let event = tokio::time::timeout(std::time::Duration::from_millis(100), sub.next())
-        .await
-        .ok()
-        .flatten();
+    let mut best_event = None;
+    loop {
+        match tokio::time::timeout(DISCOVERY_DRAIN_IDLE_TIMEOUT, sub.next()).await {
+            Ok(Some(event)) => {
+                if event.is_expired() {
+                    debug!(
+                        relay = %client.url(),
+                        event_id = %event.id,
+                        "ignoring expired service advertisement"
+                    );
+                    continue;
+                }
+
+                let should_replace = best_event
+                    .as_ref()
+                    .is_none_or(|existing| advertisement_event_is_newer(&event, existing));
+                if should_replace {
+                    best_event = Some(event);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
 
     sub.close().await?;
 
-    if let Some(ref e) = event {
+    if let Some(ref e) = best_event {
         debug!(relay = %client.url(), event_id = %e.id, "discovered service advertisement");
     } else {
         debug!(relay = %client.url(), "no service advertisement found for {responder_pubkey}");
     }
 
-    Ok(event)
+    Ok(best_event)
 }
 
 /// Build the base filter for FIPS responder advertisements.
@@ -235,6 +269,29 @@ pub fn service_advertisement_filter() -> Filter {
     Filter::new()
         .kind(Kind::Custom(SERVICE_AD_KIND))
         .identifier(FIPS_SERVICE_TAG)
+}
+
+fn advertisement_event_is_newer(new: &Event, existing: &Event) -> bool {
+    let new_secs = new.created_at.as_secs();
+    let existing_secs = existing.created_at.as_secs();
+    if new_secs != existing_secs {
+        return new_secs > existing_secs;
+    }
+
+    new.id.to_hex() < existing.id.to_hex()
+}
+
+pub(crate) fn advertisement_is_newer(
+    new: &ServiceAdvertisement,
+    existing: &ServiceAdvertisement,
+) -> bool {
+    let new_secs = new.created_at.as_secs();
+    let existing_secs = existing.created_at.as_secs();
+    if new_secs != existing_secs {
+        return new_secs > existing_secs;
+    }
+
+    new.event_id.to_hex() < existing.event_id.to_hex()
 }
 
 /// Discover a responder service advertisement and parse it into a typed struct.
@@ -253,15 +310,30 @@ pub async fn discover_service_across_relays(
     relays: &[&RelayClient],
     responder_pubkey: &PublicKey,
 ) -> Result<ServiceAdvertisement, HolePunchError> {
-    for relay in relays {
-        match discover_service_typed(relay, responder_pubkey).await {
-            Ok(Some(advertisement)) => return Ok(advertisement),
+    let results = join_all(
+        relays
+            .iter()
+            .map(|relay| discover_service_typed(relay, responder_pubkey)),
+    )
+    .await;
+
+    let mut best = None;
+    for (relay, result) in relays.iter().zip(results) {
+        match result {
+            Ok(Some(advertisement)) => {
+                let should_replace = best
+                    .as_ref()
+                    .is_none_or(|existing| advertisement_is_newer(&advertisement, existing));
+                if should_replace {
+                    best = Some(advertisement);
+                }
+            }
             Ok(None) => continue,
             Err(e) => warn!(relay = %relay.url(), error = %e, "service discovery failed on relay"),
         }
     }
 
-    Err(HolePunchError::AdvertisementNotFound)
+    best.ok_or(HolePunchError::AdvertisementNotFound)
 }
 
 /// Subscribe for incoming signaling events (kind 21059) addressed to us.
@@ -801,6 +873,27 @@ mod tests {
         }
     }
 
+    async fn publish_test_service_advertisement(
+        client: &RelayClient,
+        keys: &Keys,
+        created_at: Timestamp,
+        expiration: Option<Timestamp>,
+    ) -> Event {
+        let mut builder = EventBuilder::new(Kind::Custom(SERVICE_AD_KIND), "")
+            .tag(Tag::identifier(FIPS_SERVICE_TAG))
+            .tag(Tag::custom(
+                TagKind::custom("stun"),
+                ["stun.example.com:3478"],
+            ));
+        if let Some(expiration) = expiration {
+            builder = builder.tag(Tag::expiration(expiration));
+        }
+
+        let event = builder.custom_created_at(created_at).sign_with_keys(keys).unwrap();
+        client.publish(event.clone()).await.unwrap();
+        event
+    }
+
     #[tokio::test]
     async fn service_advertisement_roundtrip() {
         init_test_logging();
@@ -872,6 +965,74 @@ mod tests {
         rejecting_client.disconnect().await;
         accepting.shutdown().await;
         rejecting.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discover_service_ignores_expired_advertisements() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+        let now = Timestamp::now();
+
+        publish_test_service_advertisement(
+            &client,
+            &responder_keys,
+            now,
+            Some(Timestamp::from(now.as_secs().saturating_sub(1))),
+        )
+        .await;
+
+        let discovered = discover_service_typed(&client, &responder_keys.public_key())
+            .await
+            .unwrap();
+        assert!(discovered.is_none(), "expired advertisement should be ignored");
+
+        client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discover_service_across_relays_prefers_newest_valid_advertisement() {
+        init_test_logging();
+
+        let older_relay = TestRelay::start().await;
+        let newer_relay = TestRelay::start().await;
+        let older_client = RelayClient::connect(older_relay.url()).await.unwrap();
+        let newer_client = RelayClient::connect(newer_relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+
+        let older_event = publish_test_service_advertisement(
+            &older_client,
+            &responder_keys,
+            Timestamp::from(10),
+            None,
+        )
+        .await;
+        let newer_event = publish_test_service_advertisement(
+            &newer_client,
+            &responder_keys,
+            Timestamp::from(20),
+            None,
+        )
+        .await;
+
+        let discovered = discover_service_across_relays(
+            &[&older_client, &newer_client],
+            &responder_keys.public_key(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(discovered.event_id, newer_event.id);
+        assert_eq!(discovered.created_at, newer_event.created_at);
+        assert_ne!(discovered.event_id, older_event.id);
+
+        older_client.disconnect().await;
+        newer_client.disconnect().await;
+        older_relay.shutdown().await;
+        newer_relay.shutdown().await;
     }
 
     #[tokio::test]

@@ -22,9 +22,9 @@ use crate::holepunch::orchestrator::{
     subscribe_signals_all, wait_for_first_offer,
 };
 use crate::holepunch::signaling::{
-    SERVICE_AD_CLEANUP_REASON, ServiceAdvertisement, delete_service_advertisement,
-    parse_service_advertisement, publish_service_advertisement_with_ttl,
-    service_advertisement_filter,
+    SERVICE_AD_CLEANUP_REASON, ServiceAdvertisement, advertisement_is_newer,
+    delete_service_advertisement, parse_service_advertisement,
+    publish_service_advertisement_with_ttl, service_advertisement_filter,
 };
 use crate::nostr_relay::RelayClient;
 use nostr::prelude::*;
@@ -39,6 +39,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
+
+const DISCOVERY_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
+const DISCOVERY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Transport-local stats for the initial udp_holepunch integration.
 #[derive(Debug, Default, Serialize)]
@@ -190,16 +193,6 @@ impl UdpHolePunchConnection {
             let _ = task.await;
         }
     }
-}
-
-fn advertisement_is_newer(new: &ServiceAdvertisement, existing: &ServiceAdvertisement) -> bool {
-    let new_secs = new.created_at.as_secs();
-    let existing_secs = existing.created_at.as_secs();
-    if new_secs != existing_secs {
-        return new_secs > existing_secs;
-    }
-
-    new.event_id.to_hex() < existing.event_id.to_hex()
 }
 
 /// UDP hole-punch transport.
@@ -565,6 +558,37 @@ async fn run_discovery_worker(
     shared: Arc<SharedState>,
     stats: Arc<UdpHolePunchStats>,
 ) {
+    let mut reconnect_delay = DISCOVERY_RECONNECT_BASE_DELAY;
+
+    loop {
+        match run_discovery_session(transport_id, &relay_url, shared.clone(), stats.clone()).await {
+            Ok(()) => {
+                reconnect_delay = DISCOVERY_RECONNECT_BASE_DELAY;
+            }
+            Err(err) => {
+                warn!(
+                    transport_id = %transport_id,
+                    relay = %relay_url,
+                    error = %err,
+                    retry_in = ?reconnect_delay,
+                    "udp_holepunch discovery worker failed; reconnecting"
+                );
+            }
+        }
+
+        tokio::time::sleep(reconnect_delay).await;
+        reconnect_delay = reconnect_delay
+            .saturating_mul(2)
+            .min(DISCOVERY_RECONNECT_MAX_DELAY);
+    }
+}
+
+async fn run_discovery_session(
+    transport_id: TransportId,
+    relay_url: &str,
+    shared: Arc<SharedState>,
+    stats: Arc<UdpHolePunchStats>,
+) -> Result<(), String> {
     let client = match RelayClient::connect(&relay_url).await {
         Ok(client) => {
             stats.relays_connected.fetch_add(1, Ordering::Relaxed);
@@ -572,8 +596,7 @@ async fn run_discovery_worker(
             client
         }
         Err(err) => {
-            warn!(transport_id = %transport_id, relay = %relay_url, error = %err, "udp_holepunch relay connect failed");
-            return;
+            return Err(format!("relay connect failed: {err}"));
         }
     };
 
@@ -581,22 +604,30 @@ async fn run_discovery_worker(
     let mut sub = match client.subscribe(vec![filter]).await {
         Ok(sub) => sub,
         Err(err) => {
-            warn!(transport_id = %transport_id, relay = %relay_url, error = %err, "udp_holepunch advertisement subscription failed");
             client.disconnect().await;
-            return;
+            return Err(format!("advertisement subscription failed: {err}"));
         }
     };
 
     if let Err(err) = sub.wait_for_eose().await {
-        warn!(transport_id = %transport_id, relay = %relay_url, error = %err, "udp_holepunch advertisement subscription failed before EOSE");
         let _ = sub.close().await;
         client.disconnect().await;
-        return;
+        return Err(format!("advertisement subscription failed before EOSE: {err}"));
     }
 
     debug!(transport_id = %transport_id, relay = %relay_url, "udp_holepunch discovery subscription live");
 
     while let Some(event) = sub.next().await {
+        if event.is_expired() {
+            debug!(
+                transport_id = %transport_id,
+                relay = %relay_url,
+                event_id = %event.id,
+                "ignoring expired udp_holepunch advertisement"
+            );
+            continue;
+        }
+
         match parse_service_advertisement(&event) {
             Ok(advertisement) => {
                 shared.record_advertisement(transport_id, advertisement, &stats);
@@ -607,9 +638,9 @@ async fn run_discovery_worker(
         }
     }
 
-    warn!(transport_id = %transport_id, relay = %relay_url, "udp_holepunch discovery worker exited; reconnect loop not implemented yet");
     let _ = sub.close().await;
     client.disconnect().await;
+    Err("advertisement subscription closed".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -956,6 +987,21 @@ mod tests {
     use crate::stun::StunServer;
     use tokio::time::{Duration, sleep, timeout};
 
+    async fn publish_expired_service_advertisement(client: &RelayClient, keys: &Keys) {
+        let now = Timestamp::now();
+        let event = EventBuilder::new(Kind::Custom(30078), "")
+            .tag(Tag::identifier("udp-service-v1/fips"))
+            .tag(Tag::custom(
+                TagKind::custom("stun"),
+                ["stun.example.com:3478"],
+            ))
+            .tag(Tag::expiration(Timestamp::from(now.as_secs().saturating_sub(1))))
+            .custom_created_at(now)
+            .sign_with_keys(keys)
+            .unwrap();
+        client.publish(event).await.unwrap();
+    }
+
     #[test]
     fn latest_advertisement_wins_by_created_at() {
         let newer = ServiceAdvertisement {
@@ -1007,6 +1053,37 @@ mod tests {
 
         let discovered_again = transport.discover().unwrap();
         assert!(discovered_again.is_empty());
+
+        publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_ignores_expired_advertisement() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        publish_expired_service_advertisement(&publisher, &keys).await;
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(43), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        sleep(Duration::from_millis(200)).await;
+
+        let discovered = transport.discover().unwrap();
+        assert!(discovered.is_empty(), "expired advertisement should be ignored");
 
         publisher.disconnect().await;
         relay.shutdown().await;
