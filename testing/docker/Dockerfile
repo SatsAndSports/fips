@@ -14,7 +14,7 @@ RUN apt-get update && \
         iproute2 iputils-ping dnsutils \
         openssh-client openssh-server \
         dnsmasq iptables tor \
-        iperf3 curl python3 \
+        iperf3 curl python3 nftables conntrack \
         tcpdump netcat-openbsd rsync && \
     rm -rf /var/lib/apt/lists/*
 
@@ -36,8 +36,8 @@ RUN printf '%s\n' \
     'no-resolv' \
     >> /etc/dnsmasq.conf
 
-COPY fips fipsctl fipstop /usr/local/bin/
-RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop
+COPY fips fipsctl fipstop fips-gateway /usr/local/bin/
+RUN chmod +x /usr/local/bin/fips /usr/local/bin/fipsctl /usr/local/bin/fipstop /usr/local/bin/fips-gateway
 
 # Static web page for HTTP server (chaos/static modes)
 RUN printf 'Fuck IPs!\n' > /root/index.html

@@ -25,6 +25,10 @@ struct Cli {
     #[arg(short = 's', long)]
     socket: Option<PathBuf>,
 
+    /// Gateway control socket path override
+    #[arg(long)]
+    gateway_socket: Option<PathBuf>,
+
     /// Refresh interval in seconds
     #[arg(short = 'r', long, default_value = "2")]
     refresh: u64,
@@ -46,11 +50,27 @@ fn default_socket_path() -> PathBuf {
     }
 }
 
+/// Determine the default gateway socket path.
+fn default_gateway_socket_path() -> PathBuf {
+    if Path::new("/run/fips").exists() {
+        PathBuf::from("/run/fips/gateway.sock")
+    } else if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        PathBuf::from(format!("{runtime_dir}/fips/gateway.sock"))
+    } else {
+        PathBuf::from("/tmp/fips-gateway.sock")
+    }
+}
+
 fn restore_terminal() {
     ratatui::restore();
 }
 
-fn fetch_data(rt: &tokio::runtime::Runtime, client: &ControlClient, app: &mut App) {
+fn fetch_data(
+    rt: &tokio::runtime::Runtime,
+    client: &ControlClient,
+    gateway_client: &ControlClient,
+    app: &mut App,
+) {
     // Always fetch status for the status bar
     match rt.block_on(client.query("show_status")) {
         Ok(data) => {
@@ -62,6 +82,34 @@ fn fetch_data(rt: &tokio::runtime::Runtime, client: &ControlClient, app: &mut Ap
             app.last_error = Some((std::time::Instant::now(), e));
             return;
         }
+    }
+
+    // Gateway tab uses a separate socket
+    if app.active_tab == Tab::Gateway {
+        match rt.block_on(gateway_client.query("show_gateway")) {
+            Ok(data) => {
+                app.data.insert(Tab::Gateway, data);
+                app.gateway_running = true;
+            }
+            Err(_) => {
+                app.data.remove(&Tab::Gateway);
+                app.gateway_running = false;
+                app.gateway_mappings = None;
+            }
+        }
+        // Also fetch mappings for the detail table
+        if app.gateway_running {
+            match rt.block_on(gateway_client.query("show_mappings")) {
+                Ok(data) => {
+                    app.gateway_mappings = Some(data);
+                }
+                Err(_) => {
+                    app.gateway_mappings = None;
+                }
+            }
+        }
+        app.last_fetch = std::time::Instant::now();
+        return;
     }
 
     // Fetch active tab data (if not Dashboard, which we already fetched)
@@ -106,6 +154,7 @@ fn main() {
     let cli = Cli::parse();
 
     let socket_path = cli.socket.unwrap_or_else(default_socket_path);
+    let gateway_socket_path = cli.gateway_socket.unwrap_or_else(default_gateway_socket_path);
     let refresh = Duration::from_secs(cli.refresh);
 
     // Install panic hook that restores terminal before printing panic
@@ -121,6 +170,7 @@ fn main() {
         .expect("failed to create tokio runtime");
 
     let client = ControlClient::new(&socket_path);
+    let gateway_client = ControlClient::new(&gateway_socket_path);
     let mut terminal = ratatui::try_init().unwrap_or_else(|e| {
         eprintln!("fipstop: failed to initialize terminal: {e}");
         std::process::exit(1);
@@ -129,7 +179,7 @@ fn main() {
     let events = EventHandler::new(refresh);
 
     // Initial fetch
-    fetch_data(&rt, &client, &mut app);
+    fetch_data(&rt, &client, &gateway_client, &mut app);
 
     // Main loop
     loop {
@@ -150,12 +200,12 @@ fn main() {
                     (KeyCode::Tab, KeyModifiers::NONE) => {
                         app.close_detail();
                         app.active_tab = app.active_tab.next();
-                        fetch_data(&rt, &client, &mut app);
+                        fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
                     (KeyCode::BackTab, _) => {
                         app.close_detail();
                         app.active_tab = app.active_tab.prev();
-                        fetch_data(&rt, &client, &mut app);
+                        fetch_data(&rt, &client, &gateway_client, &mut app);
                     }
                     (KeyCode::Down, _) => {
                         if app.detail_view.is_some() {
@@ -225,7 +275,7 @@ fn main() {
                 // Redraw happens at top of loop
             }
             Ok(Event::Tick) => {
-                fetch_data(&rt, &client, &mut app);
+                fetch_data(&rt, &client, &gateway_client, &mut app);
             }
             Err(_) => {
                 app.should_quit = true;

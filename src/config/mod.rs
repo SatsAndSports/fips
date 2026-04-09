@@ -18,6 +18,7 @@
 //!     nsec: "nsec1..."
 //! ```
 
+mod gateway;
 mod node;
 mod peer;
 mod transport;
@@ -33,6 +34,7 @@ pub use node::{
     NodeConfig, RateLimitConfig, RekeyConfig, RetryConfig, SessionConfig, SessionMmpConfig,
     TreeConfig,
 };
+pub use gateway::{ConntrackConfig, GatewayConfig, GatewayDnsConfig};
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
 pub use transport::{BleConfig, DirectoryServiceConfig, EthernetConfig, TcpConfig, TorConfig, TransportInstances, TransportsConfig, UdpConfig};
 
@@ -316,6 +318,10 @@ pub struct Config {
     /// Static peers to connect to (`peers`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<PeerConfig>,
+
+    /// Gateway configuration (`gateway`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayConfig>,
 }
 
 impl Config {
@@ -433,6 +439,10 @@ impl Config {
         // Merge peers (replace if non-empty)
         if !other.peers.is_empty() {
             self.peers = other.peers;
+        }
+        // Merge gateway section — higher-priority config replaces entirely
+        if other.gateway.is_some() {
+            self.gateway = other.gateway;
         }
     }
 

@@ -14,7 +14,7 @@
 #   -h, --help           Show this help
 #
 # Integration suites:
-#   static-mesh, static-chain, rekey,
+#   static-mesh, static-chain, rekey, gateway,
 #   chaos-smoke-10, chaos-churn-mixed-10, chaos-ethernet-mesh,
 #   chaos-ethernet-only, chaos-tcp-mesh, chaos-bottleneck-parent,
 #   chaos-cost-avoidance, chaos-cost-reeval, chaos-cost-stability,
@@ -63,6 +63,7 @@ CHAOS_SUITES=(
     "mixed-technology mixed-technology"
     "congestion-stress congestion-stress"
 )
+GATEWAY_SUITES=(gateway)
 SIDECAR_SUITES=(sidecar)
 
 # ── Colors ─────────────────────────────────────────────────────────────────
@@ -97,6 +98,9 @@ list_suites() {
         read -ra parts <<< "$entry"
         echo "    chaos-${parts[0]}  (${parts[*]:1})"
     done
+    echo ""
+    echo "  Gateway:"
+    for s in "${GATEWAY_SUITES[@]}"; do echo "    $s"; done
     echo ""
     echo "  Sidecar:"
     for s in "${SIDECAR_SUITES[@]}"; do echo "    $s"; done
@@ -195,8 +199,10 @@ install_binaries() {
     cp target/release/fips "$dest/fips"
     cp target/release/fipsctl "$dest/fipsctl"
     [[ -f target/release/fipstop ]] && cp target/release/fipstop "$dest/fipstop" || true
+    [[ -f target/release/fips-gateway ]] && cp target/release/fips-gateway "$dest/fips-gateway" || true
     chmod +x "$dest/fips" "$dest/fipsctl"
     [[ -f "$dest/fipstop" ]] && chmod +x "$dest/fipstop" || true
+    [[ -f "$dest/fips-gateway" ]] && chmod +x "$dest/fips-gateway" || true
 }
 
 # Run a static topology test (mesh, chain)
@@ -265,6 +271,31 @@ run_chaos() {
     record "chaos-$name" $rc
 }
 
+# Run gateway integration test
+run_gateway() {
+    local compose="testing/static/docker-compose.yml"
+    local rc=0
+
+    info "[gateway] Generating configs"
+    bash testing/static/scripts/generate-configs.sh gateway gateway-test || { record "gateway" 1; return; }
+    bash testing/static/scripts/gateway-test.sh inject-config || { record "gateway" 1; return; }
+
+    info "[gateway] Starting containers"
+    docker compose -f "$compose" --profile gateway up -d || { record "gateway" 1; return; }
+
+    info "[gateway] Running gateway test"
+    if bash testing/static/scripts/gateway-test.sh; then
+        rc=0
+    else
+        rc=1
+        info "[gateway] Collecting failure logs"
+        docker compose -f "$compose" --profile gateway logs --no-color 2>&1 | tail -100
+    fi
+
+    docker compose -f "$compose" --profile gateway down --volumes --remove-orphans 2>/dev/null
+    record "gateway" $rc
+}
+
 # Run sidecar test
 run_sidecar() {
     local rc=0
@@ -306,6 +337,9 @@ run_integration() {
 
     # Rekey
     run_rekey
+
+    # Gateway
+    run_gateway
 
     # Chaos scenarios (parallel, throttled)
     if [[ "$SKIP_CHAOS" != true ]]; then
@@ -369,6 +403,8 @@ run_suite() {
             run_static "${suite#static-}" ;;
         rekey)
             run_rekey ;;
+        gateway)
+            run_gateway ;;
         chaos-*)
             local chaos_name="${suite#chaos-}"
             local found=false

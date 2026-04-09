@@ -8,6 +8,7 @@ pub mod bloom;
 pub mod cache;
 pub mod config;
 pub mod control;
+pub mod gateway;
 pub mod identity;
 pub mod mmp;
 pub mod noise;
@@ -26,7 +27,7 @@ pub use identity::{
 };
 
 // Re-export config types
-pub use config::{Config, ConfigError, IdentityConfig, TorConfig, UdpConfig};
+pub use config::{Config, ConfigError, GatewayConfig, IdentityConfig, TorConfig, UdpConfig};
 pub use upper::config::{DnsConfig, TunConfig};
 
 // Re-export tree types

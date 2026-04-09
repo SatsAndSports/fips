@@ -33,12 +33,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tun = { version = "0.8.5", features = ["async"] }
 libc = "0.2"
 rtnetlink = "0.20.0"
-tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time"] }
+tokio = { version = "1", features = ["rt", "macros", "signal", "sync", "net", "time", "process"] }
 futures = "0.3"
 simple-dns = "0.11.2"
 socket2 = { version = "0.6.2", features = ["all"] }
 tokio-socks = "0.5"
 bluer = { version = "0.17", features = ["bluetoothd", "l2cap"], optional = true }
+rustables = "0.8.7"
 
 [package.metadata.deb]
 maintainer = "Johnathan Corgan <jcorgan@corganlabs.com>"
@@ -64,6 +65,8 @@ assets = [
     ["packaging/debian/fips.service", "/lib/systemd/system/fips.service", "644"],
     ["packaging/debian/fips-dns.service", "/lib/systemd/system/fips-dns.service", "644"],
     ["packaging/debian/fips.tmpfiles", "/usr/lib/tmpfiles.d/fips.conf", "644"],
+    ["target/release/fips-gateway", "/usr/bin/", "755"],
+    ["packaging/debian/fips-gateway.service", "/lib/systemd/system/fips-gateway.service", "644"],
 ]
 conf-files = ["/etc/fips/fips.yaml", "/etc/fips/hosts"]
 
@@ -75,6 +78,10 @@ tokio = { version = "1", features = ["test-util"] }
 [[bin]]
 name = "fipsctl"
 path = "src/bin/fipsctl.rs"
+
+[[bin]]
+name = "fips-gateway"
+path = "src/bin/fips-gateway.rs"
 
 [[bin]]
 name = "fipstop"

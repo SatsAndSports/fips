@@ -1,0 +1,15 @@
+# Gateway Integration Test Topology
+#
+# Two FIPS nodes: gateway (a) and server (b), directly peered.
+# A non-FIPS client container connects via the gateway's LAN interface.
+#
+# Uses deterministic key derivation (mesh-name: gateway-test).
+
+nodes:
+  a:
+    docker_ip: "172.20.0.10"
+    peers: [b]
+
+  b:
+    docker_ip: "172.20.0.11"
+    peers: [a]

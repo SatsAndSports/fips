@@ -14,10 +14,11 @@ pub enum Tab {
     Cache,
     Transports,
     Routing,
+    Gateway,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 9] = [
         Tab::Node,
         Tab::Peers,
         Tab::Transports,
@@ -26,13 +27,15 @@ impl Tab {
         Tab::Bloom,
         Tab::Mmp,
         Tab::Routing,
+        Tab::Gateway,
     ];
 
-    /// Tab group index: 0 = Node, 1 = Connectivity, 2 = Internals.
+    /// Tab group index: 0 = Node, 1 = Connectivity, 2 = Internals, 3 = Gateway.
     pub fn group(&self) -> usize {
         match self {
             Tab::Node => 0,
             Tab::Peers | Tab::Transports => 1,
+            Tab::Gateway => 3,
             _ => 2,
         }
     }
@@ -49,6 +52,7 @@ impl Tab {
             Tab::Cache => "Cache",
             Tab::Transports => "Transports",
             Tab::Routing => "Routing",
+            Tab::Gateway => "Gateway",
         }
     }
 
@@ -64,6 +68,7 @@ impl Tab {
             Tab::Cache => "show_cache",
             Tab::Transports => "show_transports",
             Tab::Routing => "show_routing",
+            Tab::Gateway => "show_gateway",
         }
     }
 
@@ -88,6 +93,7 @@ impl Tab {
             Tab::Links => "links",
             Tab::Sessions => "sessions",
             Tab::Transports => "transports",
+            Tab::Gateway => "mappings",
             _ => "",
         }
     }
@@ -96,7 +102,7 @@ impl Tab {
     pub fn has_table(&self) -> bool {
         matches!(
             self,
-            Tab::Peers | Tab::Sessions | Tab::Transports
+            Tab::Peers | Tab::Sessions | Tab::Transports | Tab::Gateway
         )
     }
 }
@@ -131,6 +137,10 @@ pub struct App {
     pub expanded_transports: HashSet<u64>,
     pub tree_row_count: usize,
     pub selected_tree_item: SelectedTreeItem,
+    /// Whether the gateway control socket is reachable.
+    pub gateway_running: bool,
+    /// Mappings data fetched from the gateway (separate from summary).
+    pub gateway_mappings: Option<serde_json::Value>,
 }
 
 impl App {
@@ -148,6 +158,8 @@ impl App {
             expanded_transports: HashSet::new(),
             tree_row_count: 0,
             selected_tree_item: SelectedTreeItem::None,
+            gateway_running: false,
+            gateway_mappings: None,
         }
     }
 
@@ -155,6 +167,15 @@ impl App {
     pub fn row_count(&self) -> usize {
         if self.active_tab == Tab::Transports {
             return self.tree_row_count;
+        }
+        if self.active_tab == Tab::Gateway {
+            return self
+                .gateway_mappings
+                .as_ref()
+                .and_then(|v| v.get("mappings"))
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
         }
         let key = self.active_tab.command_data_key();
         self.data

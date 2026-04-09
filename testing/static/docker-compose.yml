@@ -4,6 +4,13 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/24
+  gateway-lan:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.20.1.0/24
+        - subnet: fd02::/64
 
 x-fips-common: &fips-common
   image: fips-test:latest
@@ -310,3 +317,61 @@ services:
     networks:
       fips-net:
         ipv4_address: 172.20.0.12
+
+  # ── Gateway integration test (gateway + server + non-FIPS client) ─
+  gw-gateway:
+    <<: *fips-common
+    profiles: ["gateway"]
+    container_name: fips-gw-gateway
+    hostname: gw-gateway
+    # Privileged required: gateway must enable IPv6 on eth1 (second network,
+    # attached after container start) and manage nftables NAT rules.
+    privileged: true
+    environment:
+      - RUST_LOG=info
+      - FIPS_TEST_MODE=gateway
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.default.disable_ipv6=0
+      - net.ipv6.conf.all.forwarding=1
+      - net.ipv6.conf.all.proxy_ndp=1
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/gateway/node-a.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.10
+      gateway-lan:
+        ipv4_address: 172.20.1.10
+        ipv6_address: fd02::10
+
+  gw-server:
+    <<: *fips-common
+    profiles: ["gateway"]
+    container_name: fips-gw-server
+    hostname: gw-server
+    volumes:
+      - ../docker/resolv.conf:/etc/resolv.conf:ro
+      - ./generated-configs/gateway/node-b.yaml:/etc/fips/fips.yaml:ro
+    networks:
+      fips-net:
+        ipv4_address: 172.20.0.11
+
+  gw-client:
+    image: fips-test-app:latest
+    profiles: ["gateway"]
+    container_name: fips-gw-client
+    hostname: gw-client
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    volumes:
+      - ./configs/gateway-resolv.conf:/etc/resolv.conf:ro
+    networks:
+      gateway-lan:
+        ipv4_address: 172.20.1.20
+        ipv6_address: fd02::20
+    restart: "no"
+    env_file:
+      - ./generated-configs/npubs.env

@@ -206,9 +206,42 @@ case "$MODE" in
         echo "Starting FIPS daemon..."
         exec fips --config "$CONFIG"
         ;;
+    gateway)
+        # No dnsmasq — gateway DNS replaces it on port 53
+        start_services
+
+        # Extract LAN interface from config (gateway.lan_interface)
+        LAN_IF=$(grep 'lan_interface:' "$CONFIG" | head -1 | sed 's/.*: *//' | tr -d '"' | tr -d "'")
+        LAN_IF="${LAN_IF:-eth0}"
+
+        # Wait for LAN interface (Docker attaches second network after start)
+        for i in $(seq 1 15); do
+            [ -e "/sys/class/net/$LAN_IF" ] && break
+            sleep 0.5
+        done
+
+        # Ensure IPv6 is enabled on the LAN interface (may inherit host default)
+        sysctl -w "net.ipv6.conf.${LAN_IF}.disable_ipv6=0" >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.all.proxy_ndp=1 >/dev/null 2>&1 || true
+
+        # Start fips in background (gateway needs fips0)
+        fips --config "$CONFIG" &
+        # Wait for fips0 TUN device
+        for i in $(seq 1 30); do
+            [ -e /sys/class/net/fips0 ] && break
+            sleep 1
+        done
+        if [ ! -e /sys/class/net/fips0 ]; then
+            echo "FATAL: fips0 did not appear within 30s"
+            exit 1
+        fi
+        echo "fips0 ready, starting gateway"
+        exec fips-gateway --config "$CONFIG" --log-level debug
+        ;;
     *)
         echo "Unknown FIPS_TEST_MODE: $MODE"
-        echo "Valid modes: default, chaos, sidecar, tor-socks5, tor-directory"
+        echo "Valid modes: default, chaos, sidecar, tor-socks5, tor-directory, gateway"
         exit 1
         ;;
 esac
