@@ -473,7 +473,9 @@ fn log_selected_punch_path(
     local_addr: SocketAddr,
     reflexive_addr: SocketAddr,
 ) {
-    let selected_path = if selected_addr == local_addr {
+    let selected_path = if selected_addr == local_addr && selected_addr == reflexive_addr {
+        "local==reflexive"
+    } else if selected_addr == local_addr {
         "local"
     } else if selected_addr == reflexive_addr {
         "reflexive"
