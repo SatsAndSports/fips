@@ -31,6 +31,8 @@ pub struct HolePunchConfig {
     pub probe_interval: Duration,
     /// Maximum time to spend in the punch phase.
     pub punch_timeout: Duration,
+    /// Maximum initiator attempts per call, including the first attempt.
+    pub max_attempts: usize,
 }
 
 impl Default for HolePunchConfig {
@@ -40,6 +42,7 @@ impl Default for HolePunchConfig {
             stun_attempt_timeout: Duration::from_secs(2),
             probe_interval: DEFAULT_PROBE_INTERVAL,
             punch_timeout: DEFAULT_PUNCH_TIMEOUT,
+            max_attempts: 2,
         }
     }
 }
@@ -137,6 +140,35 @@ pub async fn initiate_from_advertisement(
     if advertisement.stun_servers.is_empty() {
         return Err(HolePunchError::NoStunServers);
     }
+
+    let max_attempts = config.max_attempts.max(1);
+    let mut last_timeout = None;
+
+    for attempt in 1..=max_attempts {
+        match initiate_single_attempt_from_advertisement(socket, relays, keys, advertisement, config)
+            .await
+        {
+            Ok(path) => return Ok(path),
+            Err(HolePunchError::Timeout(duration)) if attempt < max_attempts => {
+                warn!(attempt, max_attempts, timeout = ?duration, "initiator attempt timed out; retrying");
+                last_timeout = Some(duration);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(HolePunchError::Timeout(last_timeout.expect(
+        "initiator retries should record the last timeout",
+    )))
+}
+
+async fn initiate_single_attempt_from_advertisement(
+    socket: &UdpSocket,
+    relays: &[&RelayClient],
+    keys: &Keys,
+    advertisement: &ServiceAdvertisement,
+    config: &HolePunchConfig,
+) -> Result<PunchedPath, HolePunchError> {
 
     let (local_reflexive_addr, used_stun_server) = query_stun_with_failover(
         socket,

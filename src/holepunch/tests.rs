@@ -161,7 +161,7 @@ async fn full_holepunch_localhost() {
 }
 
 #[tokio::test]
-async fn initiator_failed_attempt_cleans_up_its_offer() {
+async fn initiator_timeout_retries_once_and_cleans_up_each_offer() {
     init_test_logging();
 
     let stun_server = StunServer::bind("127.0.0.1:0").await.unwrap();
@@ -194,6 +194,7 @@ async fn initiator_failed_attempt_cleans_up_its_offer() {
         stun_attempt_timeout: Duration::from_secs(1),
         probe_interval: Duration::from_millis(50),
         punch_timeout: Duration::from_millis(150),
+        max_attempts: 2,
     };
 
     let err = initiate_from_advertisement(
@@ -217,13 +218,27 @@ async fn initiator_failed_attempt_cleans_up_its_offer() {
         .unwrap();
     deletions.wait_for_eose().await.unwrap();
 
-    let deletion = timeout(Duration::from_secs(2), deletions.next())
+    let deletion_a = timeout(Duration::from_secs(2), deletions.next())
         .await
-        .expect("timed out waiting for failed-attempt deletion")
+        .expect("timed out waiting for first failed-attempt deletion")
         .expect("deletion subscription closed");
-    assert_eq!(deletion.content, SIGNAL_CLEANUP_REASON);
+    let deletion_b = timeout(Duration::from_secs(2), deletions.next())
+        .await
+        .expect("timed out waiting for second failed-attempt deletion")
+        .expect("deletion subscription closed");
+
+    assert_eq!(deletion_a.content, SIGNAL_CLEANUP_REASON);
     assert_eq!(
-        deletion
+        deletion_a
+            .tags
+            .iter()
+            .filter(|tag| tag.kind() == TagKind::e())
+            .count(),
+        1
+    );
+    assert_eq!(deletion_b.content, SIGNAL_CLEANUP_REASON);
+    assert_eq!(
+        deletion_b
             .tags
             .iter()
             .filter(|tag| tag.kind() == TagKind::e())
