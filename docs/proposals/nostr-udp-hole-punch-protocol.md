@@ -236,6 +236,8 @@ If no valid punch packet is received within **10 seconds**, the attempt has fail
 
 If both peers' `local_addr` values are in the same private subnet (e.g., both `192.168.1.x`), the peers should simultaneously attempt punching via both the reflexive address and the local address. The first path to complete wins.
 
+If subnet masks are not known, a conservative heuristic such as matching the first three octets of RFC1918 IPv4 addresses is acceptable.
+
 ---
 
 ## Phase 6: Application Protocol Handoff

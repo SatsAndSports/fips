@@ -23,6 +23,7 @@
 
 use super::HolePunchError;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -106,6 +107,12 @@ pub fn parse_punch(buf: &[u8], expected_hash: &[u8; 16]) -> Option<PunchPacket> 
     }
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PunchProgress {
+    got_probe: bool,
+    got_ack: bool,
+}
+
 /// Run the hole-punch exchange on the given socket.
 ///
 /// Sends NPTC probes every `probe_interval` to `peer_addr`, listens for
@@ -123,15 +130,49 @@ pub async fn run_punch(
     probe_interval: Duration,
     punch_timeout: Duration,
 ) -> Result<(), HolePunchError> {
+    run_punch_candidates(
+        socket,
+        &[peer_addr],
+        session_id,
+        probe_interval,
+        punch_timeout,
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Run the hole-punch exchange against multiple candidate peer addresses.
+///
+/// Probes are sent to every candidate on each tick. Progress is tracked per
+/// source address and the first fully confirmed path wins.
+pub async fn run_punch_candidates(
+    socket: &UdpSocket,
+    peer_addrs: &[SocketAddr],
+    session_id: &str,
+    probe_interval: Duration,
+    punch_timeout: Duration,
+) -> Result<SocketAddr, HolePunchError> {
+    let mut candidates = Vec::with_capacity(peer_addrs.len());
+    for &addr in peer_addrs {
+        if !candidates.contains(&addr) {
+            candidates.push(addr);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Err(HolePunchError::InvalidSignal(
+            "no punch candidate addresses".into(),
+        ));
+    }
+
     let hash = session_hash(session_id);
     let start = Instant::now();
     let mut ticker = interval(probe_interval);
     let mut seq: u32 = 0;
     let mut buf = [0u8; 64];
-    let mut got_probe = false;
-    let mut got_ack = false;
+    let mut progress: HashMap<SocketAddr, PunchProgress> = HashMap::new();
 
-    debug!("hole punching: sending to {peer_addr}, timeout {punch_timeout:?}");
+    debug!(targets = ?candidates, timeout = ?punch_timeout, "hole punching: sending to candidate addresses");
 
     loop {
         if start.elapsed() > punch_timeout {
@@ -141,49 +182,53 @@ pub async fn run_punch(
         tokio::select! {
             _ = ticker.tick() => {
                 let packet = build_punch(seq, &hash);
-                socket.send_to(&packet, peer_addr).await?;
-                trace!("sent NPTC seq={seq} to {peer_addr}");
+                for peer_addr in &candidates {
+                    socket.send_to(&packet, peer_addr).await?;
+                    trace!("sent NPTC seq={seq} to {peer_addr}");
+                }
                 seq = seq.wrapping_add(1);
             }
             result = socket.recv_from(&mut buf) => {
                 let (n, from) = result?;
 
-                // Ignore packets not from our expected peer.
-                if from != peer_addr {
+                // Ignore packets not from any expected peer candidate.
+                if !candidates.contains(&from) {
                     trace!("ignoring packet from unexpected source {from}");
                     continue;
                 }
 
                 match parse_punch(&buf[..n], &hash) {
                     Some(PunchPacket::Probe { seq: peer_seq }) => {
+                        let state = progress.entry(from).or_default();
                         trace!("received NPTC seq={peer_seq} from {from}");
-                        got_probe = true;
+                        state.got_probe = true;
                         // Immediately ack the probe.
                         let ack = build_punch_ack(peer_seq, &hash);
                         socket.send_to(&ack, from).await?;
                         trace!("sent NPTA seq={peer_seq} to {from}");
 
-                        if got_ack {
+                        if state.got_ack {
                             debug!(
                                 "hole punch complete: received peer probe and prior NPTA from {from} \
                                  after {:.1}s",
                                 start.elapsed().as_secs_f64()
                             );
-                            return Ok(());
+                            return Ok(from);
                         }
                     }
                     Some(PunchPacket::Ack { seq: acked_seq }) => {
+                        let state = progress.entry(from).or_default();
                         // The peer received one of our probes and acked it.
-                        got_ack = true;
+                        state.got_ack = true;
                         trace!("received NPTA seq={acked_seq} from {from}");
 
-                        if got_probe {
+                        if state.got_probe {
                             debug!(
                                 "hole punch complete: received peer probe and NPTA seq={acked_seq} \
                                  from {from} after {:.1}s",
                                 start.elapsed().as_secs_f64()
                             );
-                            return Ok(());
+                            return Ok(from);
                         }
                     }
                     None => {
@@ -374,5 +419,39 @@ mod tests {
         assert!(matches!(result.unwrap_err(), HolePunchError::Timeout(_)));
         // Should have taken roughly the timeout duration, not longer.
         assert!(start.elapsed() < short_timeout + Duration::from_millis(300));
+    }
+
+    #[tokio::test]
+    async fn punch_candidates_returns_winning_address() {
+        let session_id = "candidate-punch-session";
+
+        let sock_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sock_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = sock_a.local_addr().unwrap();
+        let addr_b = sock_b.local_addr().unwrap();
+        let bogus_a: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let bogus_b: SocketAddr = "127.0.0.1:2".parse().unwrap();
+        let candidates_a = [bogus_b, addr_b];
+        let candidates_b = [bogus_a, addr_a];
+
+        let (result_a, result_b) = tokio::join!(
+            run_punch_candidates(
+                &sock_a,
+                &candidates_a,
+                session_id,
+                DEFAULT_PROBE_INTERVAL,
+                DEFAULT_PUNCH_TIMEOUT,
+            ),
+            run_punch_candidates(
+                &sock_b,
+                &candidates_b,
+                session_id,
+                DEFAULT_PROBE_INTERVAL,
+                DEFAULT_PUNCH_TIMEOUT,
+            ),
+        );
+
+        assert_eq!(result_a.unwrap(), addr_b);
+        assert_eq!(result_b.unwrap(), addr_a);
     }
 }
