@@ -594,7 +594,7 @@ fn build_gift_wrapped_signal(
     EventBuilder::new(Kind::Custom(SIGNAL_KIND), encrypted_seal)
         .tag(Tag::public_key(*recipient_pubkey))
         .tag(Tag::expiration(expiration))
-        .custom_created_at(Timestamp::tweaked(nip59::RANGE_RANDOM_TIMESTAMP_TWEAK))
+        .custom_created_at(Timestamp::now())
         .sign_with_keys(&ephemeral_keys)
         .map_err(|e| NostrError::InvalidEvent(format!("wrap sign: {e}")))
 }
@@ -1008,5 +1008,25 @@ mod tests {
         client_b.disconnect().await;
         reject_a.shutdown().await;
         reject_b.shutdown().await;
+    }
+
+    #[test]
+    fn outer_signal_event_uses_current_timestamp_and_future_expiration() {
+        let initiator_keys = Keys::generate();
+        let responder_keys = Keys::generate();
+        let offer = make_offer("timestamp-check");
+
+        let before = Timestamp::now();
+        let event = build_offer_event(&initiator_keys, &responder_keys.public_key(), &offer).unwrap();
+        let after = Timestamp::now();
+
+        assert_eq!(event.kind, Kind::Custom(SIGNAL_KIND));
+        assert!(event.created_at >= before);
+        assert!(event.created_at <= after);
+
+        let expiration = event.tags.expiration().copied().expect("missing expiration tag");
+        assert!(expiration > event.created_at);
+        assert!(expiration.as_secs() - event.created_at.as_secs() <= 120);
+        assert!(!event.is_expired());
     }
 }
