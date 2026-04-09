@@ -177,74 +177,81 @@ async fn initiate_single_attempt_from_advertisement(
     )
     .await?;
 
-    let mut subscriptions = subscribe_signals_all(relays, keys.public_key()).await?;
     let mut published_offer_ids = Vec::with_capacity(1);
 
     let result = async {
         let session_id = hex::encode(rand::random::<[u8; 16]>());
-        let offer = Offer {
-            session_id: session_id.clone(),
-            reflexive_addr: SocketAddr::V4(local_reflexive_addr),
-            local_addr: socket.local_addr()?,
-            stun_server: used_stun_server.clone(),
-            timestamp: Timestamp::now().as_secs(),
-        };
+        let reply_keys = Keys::generate();
+        let mut subscriptions = subscribe_signals_all(relays, reply_keys.public_key()).await?;
+        let result = async {
+            let offer = Offer {
+                session_id: session_id.clone(),
+                reflexive_addr: SocketAddr::V4(local_reflexive_addr),
+                local_addr: socket.local_addr()?,
+                stun_server: used_stun_server.clone(),
+                reply_pubkey: reply_keys.public_key(),
+                timestamp: Timestamp::now().as_secs(),
+            };
 
-        let offer_event = send_offer_all(relays, keys, &advertisement.peer_pubkey, &offer).await?;
-        published_offer_ids.push(offer_event.id);
+            let offer_event = send_offer_all(relays, keys, &advertisement.peer_pubkey, &offer).await?;
+            published_offer_ids.push(offer_event.id);
 
-        loop {
-            let answer_event = wait_for_first_signal(&mut subscriptions, Some(config.signal_timeout)).await?;
+            loop {
+                let answer_event = wait_for_first_signal(&mut subscriptions, Some(config.signal_timeout)).await?;
 
-            let (sender_pubkey, answer) = match parse_answer_event(keys, &answer_event) {
-                Ok(result) => result,
-                Err(_) => {
-                    debug!(event_id = %answer_event.id, "ignoring non-answer signal while awaiting answer");
+                let (sender_pubkey, answer) = match parse_answer_event(&reply_keys, &answer_event) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        debug!(event_id = %answer_event.id, "ignoring non-answer signal while awaiting answer");
+                        continue;
+                    }
+                };
+                if sender_pubkey != advertisement.peer_pubkey {
+                    debug!(
+                        event_id = %answer_event.id,
+                        author = %sender_pubkey,
+                        expected = %advertisement.peer_pubkey,
+                        "ignoring answer from unexpected peer"
+                    );
                     continue;
                 }
-            };
-            if sender_pubkey != advertisement.peer_pubkey {
-                debug!(
-                    event_id = %answer_event.id,
-                    author = %sender_pubkey,
-                    expected = %advertisement.peer_pubkey,
-                    "ignoring answer from unexpected peer"
-                );
-                continue;
+                if answer.session_id != session_id {
+                    debug!(
+                        event_id = %answer_event.id,
+                        expected = %session_id,
+                        actual = %answer.session_id,
+                        "ignoring answer for a different session"
+                    );
+                    continue;
+                }
+
+                let peer_addr = answer.reflexive_addr;
+
+                run_punch(
+                    socket,
+                    peer_addr,
+                    &session_id,
+                    config.probe_interval,
+                    config.punch_timeout,
+                )
+                .await?;
+
+                return Ok(PunchedPath {
+                    peer_pubkey: advertisement.peer_pubkey,
+                    peer_addr,
+                    session_id,
+                    local_reflexive_addr,
+                    used_stun_server: used_stun_server.clone(),
+                });
             }
-            if answer.session_id != session_id {
-                debug!(
-                    event_id = %answer_event.id,
-                    expected = %session_id,
-                    actual = %answer.session_id,
-                    "ignoring answer for a different session"
-                );
-                continue;
-            }
-
-            let peer_addr = answer.reflexive_addr;
-
-            run_punch(
-                socket,
-                peer_addr,
-                &session_id,
-                config.probe_interval,
-                config.punch_timeout,
-            )
-            .await?;
-
-            return Ok(PunchedPath {
-                peer_pubkey: advertisement.peer_pubkey,
-                peer_addr,
-                session_id,
-                local_reflexive_addr,
-                used_stun_server: used_stun_server.clone(),
-            });
         }
+        .await;
+
+        close_subscriptions(subscriptions).await;
+        result
     }
     .await;
 
-    close_subscriptions(subscriptions).await;
     cleanup_signaling_events(relays, keys, &published_offer_ids).await;
     result
 }
@@ -272,7 +279,7 @@ pub async fn accept_offer(
         timestamp: Timestamp::now().as_secs(),
     };
 
-    let answer_event = send_answer_all(relays, keys, &incoming_offer.sender_pubkey, &answer).await?;
+    let answer_event = send_answer_all(relays, keys, &offer.reply_pubkey, &answer).await?;
     let published_answer_ids = [answer_event.id];
 
     let peer_addr = offer.reflexive_addr;

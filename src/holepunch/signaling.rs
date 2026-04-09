@@ -71,6 +71,9 @@ struct SignalingPayload {
     pub local_addr: String,
     /// Which STUN server was used.
     pub stun_server: String,
+    /// Per-session pubkey where the responder should send the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_pubkey: Option<String>,
     /// Unix timestamp (seconds).
     pub timestamp: u64,
 }
@@ -91,6 +94,7 @@ pub struct Offer {
     pub reflexive_addr: SocketAddr,
     pub local_addr: SocketAddr,
     pub stun_server: String,
+    pub reply_pubkey: PublicKey,
     pub timestamp: u64,
 }
 
@@ -691,6 +695,7 @@ fn offer_to_payload(offer: &Offer) -> SignalingPayload {
         reflexive_addr: offer.reflexive_addr.to_string(),
         local_addr: offer.local_addr.to_string(),
         stun_server: offer.stun_server.clone(),
+        reply_pubkey: Some(offer.reply_pubkey.to_string()),
         timestamp: offer.timestamp,
     }
 }
@@ -702,6 +707,7 @@ fn answer_to_payload(answer: &Answer) -> SignalingPayload {
         reflexive_addr: answer.reflexive_addr.to_string(),
         local_addr: answer.local_addr.to_string(),
         stun_server: answer.stun_server.clone(),
+        reply_pubkey: None,
         timestamp: answer.timestamp,
     }
 }
@@ -719,6 +725,13 @@ fn payload_to_offer(payload: SignalingPayload) -> Result<Offer, NostrError> {
         reflexive_addr: parse_socket_addr(&payload.reflexive_addr, "offer reflexive_addr")?,
         local_addr: parse_socket_addr(&payload.local_addr, "offer local_addr")?,
         stun_server: payload.stun_server,
+        reply_pubkey: parse_public_key(
+            payload
+                .reply_pubkey
+                .as_deref()
+                .ok_or_else(|| NostrError::InvalidEvent("offer missing reply_pubkey".into()))?,
+            "offer reply_pubkey",
+        )?,
         timestamp: payload.timestamp,
     })
 }
@@ -745,6 +758,11 @@ fn parse_socket_addr(addr: &str, field: &str) -> Result<SocketAddr, NostrError> 
         .map_err(|e| NostrError::InvalidEvent(format!("invalid {field} '{addr}': {e}")))
 }
 
+fn parse_public_key(pubkey: &str, field: &str) -> Result<PublicKey, NostrError> {
+    PublicKey::parse(pubkey)
+        .map_err(|e| NostrError::InvalidEvent(format!("invalid {field} '{pubkey}': {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,12 +771,13 @@ mod tests {
     use std::time::Duration;
     use tokio::time::timeout;
 
-    fn make_offer(session_id: &str) -> Offer {
+    fn make_offer(session_id: &str, reply_pubkey: PublicKey) -> Offer {
         Offer {
             session_id: session_id.to_string(),
             reflexive_addr: "1.2.3.4:5678".parse().unwrap(),
             local_addr: "192.168.1.10:5678".parse().unwrap(),
             stun_server: "stun.example.com:3478".to_string(),
+            reply_pubkey,
             timestamp: 1700000000,
         }
     }
@@ -942,6 +961,7 @@ mod tests {
 
         let initiator_keys = Keys::generate();
         let responder_keys = Keys::generate();
+        let reply_keys = Keys::generate();
 
         // Both peers connect to the relay.
         let initiator_client = RelayClient::connect(relay.url()).await.unwrap();
@@ -971,7 +991,7 @@ mod tests {
         assert!(discovered.is_some(), "initiator should find the service");
 
         let session_id = "deadbeef12345678deadbeef12345678";
-        let offer = make_offer(session_id);
+        let offer = make_offer(session_id, reply_keys.public_key());
 
         send_offer(
             &initiator_client,
@@ -992,10 +1012,11 @@ mod tests {
         assert_eq!(received_offer.sender_pubkey, initiator_keys.public_key());
         assert_eq!(received_offer.offer.session_id, session_id);
         assert_eq!(received_offer.offer.reflexive_addr, "1.2.3.4:5678".parse::<SocketAddr>().unwrap());
+        assert_eq!(received_offer.offer.reply_pubkey, reply_keys.public_key());
 
         // --- Responder sends answer ---
-        // First subscribe for the answer on the initiator side.
-        let mut initiator_sub = subscribe_signals(&initiator_client, &initiator_keys.public_key())
+        // First subscribe for the answer on the initiator reply pubkey.
+        let mut initiator_sub = subscribe_signals(&initiator_client, &reply_keys.public_key())
             .await
             .unwrap();
 
@@ -1003,7 +1024,7 @@ mod tests {
         send_answer(
             &responder_client,
             &responder_keys,
-            &initiator_keys.public_key(),
+            &reply_keys.public_key(),
             &answer,
         )
         .await
@@ -1015,7 +1036,17 @@ mod tests {
             .expect("initiator timed out waiting for answer")
             .expect("initiator subscription closed");
 
-        let (answer_sender, received_answer) = parse_answer_event(&initiator_keys, &answer_event).unwrap();
+        let reply_pubkey = reply_keys.public_key().to_string();
+        assert_eq!(
+            answer_event
+                .tags
+                .iter()
+                .find(|tag| tag.kind() == TagKind::p())
+                .and_then(|tag| tag.content()),
+            Some(reply_pubkey.as_str())
+        );
+
+        let (answer_sender, received_answer) = parse_answer_event(&reply_keys, &answer_event).unwrap();
         assert_eq!(answer_sender, responder_keys.public_key());
         assert_eq!(received_answer.session_id, session_id);
         assert_eq!(received_answer.reflexive_addr, "5.6.7.8:9012".parse::<SocketAddr>().unwrap());
@@ -1039,7 +1070,8 @@ mod tests {
 
         let initiator_keys = Keys::generate();
         let responder_keys = Keys::generate();
-        let offer = make_offer("offer-partial-success");
+        let reply_keys = Keys::generate();
+        let offer = make_offer("offer-partial-success", reply_keys.public_key());
 
         let event = send_offer_all(
             &[&accepting_client, &rejecting_client],
@@ -1098,7 +1130,8 @@ mod tests {
     fn outer_signal_event_uses_current_timestamp_and_future_expiration() {
         let initiator_keys = Keys::generate();
         let responder_keys = Keys::generate();
-        let offer = make_offer("timestamp-check");
+        let reply_keys = Keys::generate();
+        let offer = make_offer("timestamp-check", reply_keys.public_key());
 
         let before = Timestamp::now();
         let event = build_offer_event(&initiator_keys, &responder_keys.public_key(), &offer).unwrap();

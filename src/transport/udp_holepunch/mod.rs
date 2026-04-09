@@ -1125,6 +1125,10 @@ mod tests {
             "0000000000000000000000000000000000000000000000000000000000000002",
         )
         .unwrap();
+        let reply_pubkey = PublicKey::parse(
+            "0000000000000000000000000000000000000000000000000000000000000004",
+        )
+        .unwrap();
 
         let offer = crate::holepunch::signaling::IncomingOffer {
             sender_pubkey: sender,
@@ -1137,6 +1141,7 @@ mod tests {
                 reflexive_addr: "1.2.3.4:1111".parse().unwrap(),
                 local_addr: "10.0.0.2:1111".parse().unwrap(),
                 stun_server: "stun.example.com:3478".into(),
+                reply_pubkey,
                 timestamp: 1,
             },
         };
