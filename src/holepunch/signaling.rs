@@ -49,6 +49,14 @@ const RELAY_PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Default reason for deleting completed or abandoned signaling events.
 pub const SIGNAL_CLEANUP_REASON: &str = "session concluded";
 
+/// Default reason for deleting a responder advertisement at shutdown.
+pub const SERVICE_AD_CLEANUP_REASON: &str = "responder offline";
+
+/// Build the stable coordinate for the responder service advertisement.
+pub fn service_advertisement_coordinate(pubkey: PublicKey) -> Coordinate {
+    Coordinate::new(Kind::Custom(SERVICE_AD_KIND), pubkey).identifier(FIPS_SERVICE_TAG)
+}
+
 /// The signaling payload exchanged between initiator and responder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct SignalingPayload {
@@ -167,6 +175,18 @@ pub async fn publish_service_advertisement(
     );
 
     publish_event_all(relays, event, "service advertisement").await
+}
+
+/// Publish a kind 30078 service advertisement with a TTL-based expiration tag.
+pub async fn publish_service_advertisement_with_ttl(
+    relays: &[&RelayClient],
+    keys: &Keys,
+    stun_servers: &[&str],
+    relay_urls: &[&str],
+    ttl: Duration,
+) -> Result<Event, NostrError> {
+    let expiration = Timestamp::from(Timestamp::now().as_secs() + ttl.as_secs());
+    publish_service_advertisement(relays, keys, stun_servers, relay_urls, Some(expiration)).await
 }
 
 /// Discover a responder's service advertisement (kind 30078).
@@ -363,6 +383,27 @@ pub async fn publish_deletion_event(
     );
 
     publish_event_all(relays, event, "deletion request").await
+}
+
+/// Publish a kind 5 deletion request for the responder service advertisement.
+pub async fn delete_service_advertisement(
+    relays: &[&RelayClient],
+    keys: &Keys,
+    reason: &str,
+) -> Result<Event, NostrError> {
+    let coordinate = service_advertisement_coordinate(keys.public_key());
+    let mut request = EventDeletionRequest::new().coordinate(coordinate);
+    if !reason.is_empty() {
+        request = request.reason(reason);
+    }
+
+    let event = EventBuilder::delete(request)
+        .sign_with_keys(keys)
+        .map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
+
+    debug!(event_id = %event.id, "publishing service advertisement deletion request");
+
+    publish_event_all(relays, event, "service advertisement deletion").await
 }
 
 async fn publish_event_all(
@@ -842,6 +883,49 @@ mod tests {
         let stored = timeout(Duration::from_secs(2), sub.next())
             .await
             .expect("timed out waiting for stored deletion event")
+            .expect("subscription closed");
+        assert_eq!(stored.id, event.id);
+
+        sub.close().await.unwrap();
+        client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn delete_service_advertisement_creates_coordinate_deletion_request() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        let event = delete_service_advertisement(&[&client], &keys, SERVICE_AD_CLEANUP_REASON)
+            .await
+            .unwrap();
+
+        assert_eq!(event.kind, Kind::EventDeletion);
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.content, SERVICE_AD_CLEANUP_REASON);
+        assert_eq!(event.tags.iter().filter(|tag| tag.kind() == TagKind::a()).count(), 1);
+
+        let coordinate = event
+            .tags
+            .coordinates()
+            .next()
+            .expect("missing coordinate tag");
+        assert_eq!(coordinate.kind, Kind::Custom(SERVICE_AD_KIND));
+        assert_eq!(coordinate.public_key, keys.public_key());
+        assert_eq!(coordinate.identifier, FIPS_SERVICE_TAG);
+
+        let filter = Filter::new()
+            .kind(Kind::EventDeletion)
+            .author(keys.public_key());
+        let mut sub = client.subscribe(vec![filter]).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        let stored = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("timed out waiting for stored advertisement deletion event")
             .expect("subscription closed");
         assert_eq!(stored.id, event.id);
 

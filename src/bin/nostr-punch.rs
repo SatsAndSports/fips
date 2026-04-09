@@ -10,8 +10,11 @@ use fips::holepunch::orchestrator::{
     wait_for_first_offer,
 };
 use fips::holepunch::punch::{parse_punch, session_hash};
-use fips::holepunch::signaling::{discover_service_across_relays, publish_service_advertisement};
-use fips::nostr_relay::{RelayClient, Subscription};
+use fips::holepunch::signaling::{
+    SERVICE_AD_CLEANUP_REASON, delete_service_advertisement, discover_service_across_relays,
+    publish_service_advertisement,
+};
+use fips::nostr_relay::RelayClient;
 use fips::version;
 use futures::future::join_all;
 use nostr::prelude::*;
@@ -234,32 +237,67 @@ async fn run_responder(
         .map_err(|e| format!("failed to publish service advertisement: {e}"))?;
     info!("published service advertisement");
 
+    let mut final_error = None;
     loop {
-        match handle_responder_session(keys, relays, &socket, &mut subs, &args.stun, &config).await
+        let incoming_offer = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("shutting down responder");
+                break;
+            }
+            result = wait_for_first_offer(&mut subs, keys, None) => {
+                match result {
+                    Ok(offer) => offer,
+                    Err(e) if e.to_string() == "all relay subscriptions closed" => {
+                        final_error = Some(
+                            "all relay subscriptions closed; restart the responder or add reconnect logic"
+                                .to_string(),
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "responder session failed; continuing to listen");
+                        continue;
+                    }
+                }
+            }
+        };
+
+        match handle_responder_offer(
+            keys,
+            relays,
+            &socket,
+            &incoming_offer,
+            &args.stun,
+            &config,
+        )
+        .await
         {
             Ok(()) => info!("responder ready for another connection"),
-            Err(e) if e == "all relay subscriptions closed" => {
-                return Err(
-                    "all relay subscriptions closed; restart the responder or add reconnect logic"
-                        .into(),
-                );
-            }
             Err(e) => warn!(error = %e, "responder session failed; continuing to listen"),
         }
     }
+
+    for sub in subs {
+        let _ = sub.close().await;
+    }
+    if let Err(err) = delete_service_advertisement(relays, keys, SERVICE_AD_CLEANUP_REASON).await {
+        warn!(error = %err, "failed to delete service advertisement on shutdown");
+    }
+
+    match final_error {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
 }
 
-async fn handle_responder_session(
+async fn handle_responder_offer(
     keys: &Keys,
     relays: &[&RelayClient],
     socket: &UdpSocket,
-    subs: &mut [Subscription],
+    incoming_offer: &fips::holepunch::signaling::IncomingOffer,
     fallback_stun_servers: &[String],
     config: &HolePunchConfig,
 ) -> Result<(), String> {
-    let incoming_offer = wait_for_first_offer(subs, keys, None)
-        .await
-        .map_err(|e| e.to_string())?;
     let path = accept_offer(socket, relays, keys, &incoming_offer, fallback_stun_servers, config)
         .await
         .map_err(|e| e.to_string())?;

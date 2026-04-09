@@ -22,7 +22,8 @@ use crate::holepunch::orchestrator::{
     subscribe_signals_all, wait_for_first_offer,
 };
 use crate::holepunch::signaling::{
-    ServiceAdvertisement, parse_service_advertisement, publish_service_advertisement,
+    SERVICE_AD_CLEANUP_REASON, ServiceAdvertisement, delete_service_advertisement,
+    parse_service_advertisement, publish_service_advertisement_with_ttl,
     service_advertisement_filter,
 };
 use crate::nostr_relay::RelayClient;
@@ -35,6 +36,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -209,6 +211,8 @@ pub struct UdpHolePunchTransport {
     packet_tx: PacketTx,
     keys: Option<Keys>,
     relay_tasks: Vec<JoinHandle<()>>,
+    responder_task: Option<JoinHandle<()>>,
+    responder_shutdown: Option<oneshot::Sender<()>>,
     shared: Arc<SharedState>,
     stats: Arc<UdpHolePunchStats>,
 }
@@ -228,6 +232,8 @@ impl UdpHolePunchTransport {
             packet_tx,
             keys: None,
             relay_tasks: Vec::new(),
+            responder_task: None,
+            responder_shutdown: None,
             shared: Arc::new(SharedState::new()),
             stats: Arc::new(UdpHolePunchStats::default()),
         }
@@ -297,6 +303,13 @@ impl UdpHolePunchTransport {
     pub async fn stop_async(&mut self) -> Result<(), TransportError> {
         if !self.state.is_operational() {
             return Err(TransportError::NotStarted);
+        }
+
+        if let Some(shutdown_tx) = self.responder_shutdown.take() {
+            let _ = shutdown_tx.send(());
+        }
+        if let Some(task) = self.responder_task.take() {
+            let _ = task.await;
         }
 
         for task in self.relay_tasks.drain(..) {
@@ -489,11 +502,14 @@ impl UdpHolePunchTransport {
         let config = self.config.clone();
         let packet_tx = self.packet_tx.clone();
         let hp_config = self.hole_punch_config();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let task = tokio::spawn(async move {
-            run_responder_worker(transport_id, config, keys, hp_config, shared, packet_tx).await;
+            run_responder_worker(transport_id, config, keys, hp_config, shared, packet_tx, shutdown_rx)
+                .await;
         });
-        self.relay_tasks.push(task);
+        self.responder_shutdown = Some(shutdown_tx);
+        self.responder_task = Some(task);
     }
 }
 
@@ -734,6 +750,7 @@ async fn run_responder_worker(
     hp_config: HolePunchConfig,
     shared: Arc<SharedState>,
     packet_tx: PacketTx,
+    mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     // Connect to relays.
     let mut relays = Vec::new();
@@ -755,19 +772,6 @@ async fn run_responder_worker(
 
     let relay_refs: Vec<&RelayClient> = relays.iter().collect();
 
-    // Publish service advertisement so initiators can discover us.
-    let stun_refs: Vec<&str> = config.stun_servers.iter().map(|s| s.as_str()).collect();
-    let relay_url_refs: Vec<&str> = config.relays.iter().map(|s| s.as_str()).collect();
-    let expiration = Timestamp::from(Timestamp::now().as_secs() + config.ad_expiration_secs());
-    if let Err(err) = publish_service_advertisement(&relay_refs, &keys, &stun_refs, &relay_url_refs, Some(expiration)).await {
-        error!(transport_id = %transport_id, error = %err, "udp_holepunch responder: failed to publish advertisement");
-        for relay in relays {
-            relay.disconnect().await;
-        }
-        return;
-    }
-    info!(transport_id = %transport_id, "udp_holepunch responder: advertisement published");
-
     // Subscribe for incoming signals (offers).
     let mut subscriptions = match subscribe_signals_all(&relay_refs, keys.public_key()).await {
         Ok(subs) => subs,
@@ -786,16 +790,54 @@ async fn run_responder_worker(
     );
     let mut recent_offers = RecentOfferDedup::default();
     let offer_dedup_ttl = hp_config.signal_timeout + hp_config.punch_timeout;
+    let ad_ttl = Duration::from_secs(config.ad_expiration_secs());
+    let refresh_interval = Duration::from_secs((config.ad_expiration_secs() / 2).max(1));
+    let mut next_refresh = Instant::now();
+    let refresh_poll_cap = Duration::from_secs(1);
+    let stun_refs: Vec<&str> = config.stun_servers.iter().map(|s| s.as_str()).collect();
+    let relay_url_refs: Vec<&str> = config.relays.iter().map(|s| s.as_str()).collect();
+    let mut advertisement_live = false;
 
     // Accept loop -- handle offers one at a time.
     loop {
-        let offer = match wait_for_first_offer(&mut subscriptions, &keys, None).await {
-            Ok(offer) => offer,
-            Err(err) => {
-                warn!(transport_id = %transport_id, error = %err, "udp_holepunch responder: offer wait failed; exiting");
-                break;
+        if Instant::now() >= next_refresh {
+            match publish_service_advertisement_with_ttl(
+                &relay_refs,
+                &keys,
+                &stun_refs,
+                &relay_url_refs,
+                ad_ttl,
+            )
+            .await
+            {
+                Ok(_) => {
+                    advertisement_live = true;
+                    next_refresh = Instant::now() + refresh_interval;
+                    info!(transport_id = %transport_id, expires_in_secs = ad_ttl.as_secs(), "udp_holepunch responder: advertisement published");
+                }
+                Err(err) => {
+                    warn!(transport_id = %transport_id, error = %err, "udp_holepunch responder: failed to refresh advertisement");
+                    next_refresh = Instant::now() + refresh_interval;
+                }
+            }
+        }
+
+        let wait_timeout = refresh_poll_cap.min(next_refresh.saturating_duration_since(Instant::now()));
+        let offer = tokio::select! {
+            _ = &mut shutdown_rx => break,
+            result = wait_for_first_offer(&mut subscriptions, &keys, Some(wait_timeout)) => {
+                match result {
+                    Ok(offer) => offer,
+                    Err(crate::holepunch::HolePunchError::Timeout(_)) => continue,
+                    Err(err) => {
+                        warn!(transport_id = %transport_id, error = %err, "udp_holepunch responder: offer wait failed; exiting");
+                        break;
+                    }
+                }
             }
         };
+
+        let offer = offer;
 
         if recent_offers.should_skip(&offer, offer_dedup_ttl) {
             debug!(
@@ -885,6 +927,16 @@ async fn run_responder_worker(
     for sub in subscriptions {
         let _ = sub.close().await;
     }
+    if advertisement_live {
+        match delete_service_advertisement(&relay_refs, &keys, SERVICE_AD_CLEANUP_REASON).await {
+            Ok(_) => {
+                info!(transport_id = %transport_id, "udp_holepunch responder: advertisement deleted");
+            }
+            Err(err) => {
+                warn!(transport_id = %transport_id, error = %err, "udp_holepunch responder: failed to delete advertisement");
+            }
+        }
+    }
     for relay in relays {
         relay.disconnect().await;
     }
@@ -898,7 +950,7 @@ async fn run_responder_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::holepunch::signaling::publish_service_advertisement;
+    use crate::holepunch::signaling::{SERVICE_AD_CLEANUP_REASON, publish_service_advertisement};
     use crate::nostr_relay::init_test_logging;
     use crate::nostr_relay::test_relay::TestRelay;
     use crate::stun::StunServer;
@@ -1010,6 +1062,59 @@ mod tests {
         );
 
         transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_async_deletes_responder_advertisement() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let relay_url = relay.url().to_string();
+        let responder_keys = Keys::generate();
+        let config = UdpHolePunchConfig {
+            bind_ip: Some("127.0.0.1".to_string()),
+            relays: vec![relay_url.clone()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            accept_connections: Some(true),
+            auto_connect: Some(false),
+            ad_expiration_secs: Some(60),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(7), None, config, packet_tx);
+        transport.set_keys(responder_keys.clone());
+        transport.start_async().await.unwrap();
+
+        sleep(Duration::from_millis(300)).await;
+        transport.stop_async().await.unwrap();
+
+        let observer = RelayClient::connect(&relay_url).await.unwrap();
+        let filter = Filter::new()
+            .kind(Kind::EventDeletion)
+            .author(responder_keys.public_key());
+        let mut sub = observer.subscribe(vec![filter]).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        let deletion = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("timed out waiting for advertisement deletion")
+            .expect("deletion subscription closed");
+        assert_eq!(deletion.content, SERVICE_AD_CLEANUP_REASON);
+        assert_eq!(deletion.tags.iter().filter(|tag| tag.kind() == TagKind::a()).count(), 1);
+
+        let coordinate = deletion
+            .tags
+            .coordinates()
+            .next()
+            .expect("missing advertisement coordinate");
+        assert_eq!(coordinate.kind, Kind::Custom(30078));
+        assert_eq!(coordinate.public_key, responder_keys.public_key());
+        assert_eq!(coordinate.identifier, "udp-service-v1/fips");
+
+        sub.close().await.unwrap();
+        observer.disconnect().await;
+        relay.shutdown().await;
     }
 
     #[test]
