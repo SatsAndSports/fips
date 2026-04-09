@@ -987,19 +987,38 @@ mod tests {
     use crate::stun::StunServer;
     use tokio::time::{Duration, sleep, timeout};
 
-    async fn publish_expired_service_advertisement(client: &RelayClient, keys: &Keys) {
-        let now = Timestamp::now();
+    async fn publish_test_service_advertisement(
+        client: &RelayClient,
+        keys: &Keys,
+        created_at: Timestamp,
+        expiration: Option<Timestamp>,
+    ) -> Event {
         let event = EventBuilder::new(Kind::Custom(30078), "")
             .tag(Tag::identifier("udp-service-v1/fips"))
             .tag(Tag::custom(
                 TagKind::custom("stun"),
                 ["stun.example.com:3478"],
             ))
-            .tag(Tag::expiration(Timestamp::from(now.as_secs().saturating_sub(1))))
-            .custom_created_at(now)
-            .sign_with_keys(keys)
-            .unwrap();
-        client.publish(event).await.unwrap();
+            .custom_created_at(created_at);
+        let event = match expiration {
+            Some(expiration) => event.tag(Tag::expiration(expiration)),
+            None => event,
+        }
+        .sign_with_keys(keys)
+        .unwrap();
+        client.publish(event.clone()).await.unwrap();
+        event
+    }
+
+    async fn publish_expired_service_advertisement(client: &RelayClient, keys: &Keys) {
+        let now = Timestamp::now();
+        let _ = publish_test_service_advertisement(
+            client,
+            keys,
+            now,
+            Some(Timestamp::from(now.as_secs().saturating_sub(1))),
+        )
+        .await;
     }
 
     #[test]
@@ -1086,6 +1105,106 @@ mod tests {
         assert!(discovered.is_empty(), "expired advertisement should be ignored");
 
         publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discovery_worker_reconnects_after_relay_connection_drop() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let relay_url = relay.url().to_string();
+        let responder_keys = Keys::generate();
+        let initial_publisher = RelayClient::connect(&relay_url).await.unwrap();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay_url.clone()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(44), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        let initial_event = publish_test_service_advertisement(
+            &initial_publisher,
+            &responder_keys,
+            Timestamp::from(10),
+            None,
+        )
+        .await;
+
+        let discovered_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                let discovered = transport.discover().unwrap();
+                if let Some(peer) = discovered.into_iter().next() {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for initial discovery");
+
+        let cached_initial_event_id = {
+            let handles = transport.shared.handles.lock().unwrap();
+            handles
+                .get(&discovered_handle)
+                .expect("missing cached advertisement")
+                .event_id
+        };
+        assert_eq!(cached_initial_event_id, initial_event.id);
+
+        relay.drop_connections().await;
+        initial_publisher.disconnect().await;
+
+        let publisher_after_drop = RelayClient::connect(&relay_url).await.unwrap();
+        let newer_event = publish_test_service_advertisement(
+            &publisher_after_drop,
+            &responder_keys,
+            Timestamp::from(20),
+            None,
+        )
+        .await;
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if transport.stats().relays_connected >= 2 {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for relay reconnect");
+
+        let rediscovered_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                let discovered = transport.discover().unwrap();
+                if let Some(peer) = discovered.into_iter().find(|peer| peer.addr == discovered_handle) {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for refreshed discovery");
+        assert_eq!(rediscovered_handle, discovered_handle);
+
+        let cached_new_event_id = {
+            let handles = transport.shared.handles.lock().unwrap();
+            handles
+                .get(&discovered_handle)
+                .expect("missing refreshed advertisement")
+                .event_id
+        };
+        assert_eq!(cached_new_event_id, newer_event.id);
+        assert_ne!(cached_new_event_id, cached_initial_event_id);
+
+        publisher_after_drop.disconnect().await;
         relay.shutdown().await;
         transport.stop_async().await.unwrap();
     }

@@ -78,13 +78,26 @@ impl TestRelay {
         &self.url
     }
 
+    /// Forcibly drop all active client connections while keeping the listener alive.
+    pub async fn drop_connections(&self) {
+        Self::abort_connection_tasks(&self.connections).await;
+    }
+
     /// Shut down the relay.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(());
         let _ = self.task.await;
 
-        let mut connections = self.connections.lock().await;
-        for task in connections.drain(..) {
+        Self::abort_connection_tasks(&self.connections).await;
+    }
+
+    async fn abort_connection_tasks(connections: &Arc<tokio::sync::Mutex<Vec<JoinHandle<()>>>>) {
+        let tasks = {
+            let mut connections = connections.lock().await;
+            connections.drain(..).collect::<Vec<_>>()
+        };
+
+        for task in tasks {
             task.abort();
             let _ = task.await;
         }
