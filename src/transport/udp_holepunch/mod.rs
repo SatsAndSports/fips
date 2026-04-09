@@ -42,8 +42,14 @@ use tracing::{debug, error, info, warn};
 
 const DISCOVERY_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 const DISCOVERY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+const DISCOVERY_DELETION_REPLAY_SKEW_SECS: u64 = 60;
 const TRANSPORT_SERVICE_AD_KIND: u16 = 30078;
 const TRANSPORT_SERVICE_TAG: &str = "udp-service-v1/fips";
+
+enum DiscoverySessionOutcome {
+    ConnectedThenClosed,
+    Failed(String),
+}
 
 /// Transport-local stats for the initial udp_holepunch integration.
 #[derive(Debug, Default, Serialize)]
@@ -128,10 +134,8 @@ impl SharedState {
         }
 
         let pubkey = advertisement.peer_pubkey.to_hex();
-        let deletion_is_newer = self
-            .latest_deletion_by_pubkey
-            .lock()
-            .unwrap()
+        let latest_deletions = self.latest_deletion_by_pubkey.lock().unwrap();
+        let deletion_is_newer = latest_deletions
             .get(&pubkey)
             .is_some_and(|deletion| !event_is_newer_than_event(&advertisement, deletion));
         if deletion_is_newer {
@@ -144,6 +148,18 @@ impl SharedState {
         }
 
         let mut latest = self.latest_by_pubkey.lock().unwrap();
+        if latest_deletions
+            .get(&pubkey)
+            .is_some_and(|deletion| !event_is_newer_than_event(&advertisement, deletion))
+        {
+            debug!(
+                peer_pubkey = %pubkey,
+                event_id = %advertisement.event_id,
+                "ignoring advertisement superseded by a newer deletion"
+            );
+            return;
+        }
+
         match latest.get_mut(&pubkey) {
             Some(existing) => {
                 if advertisement_is_newer(&advertisement, &existing.advertisement) {
@@ -197,6 +213,7 @@ impl SharedState {
             .filter(|coordinate| {
                 coordinate.kind.as_u16() == TRANSPORT_SERVICE_AD_KIND
                     && coordinate.identifier == TRANSPORT_SERVICE_TAG
+                    && coordinate.public_key == event.pubkey
             })
             .cloned()
             .collect();
@@ -216,21 +233,25 @@ impl SharedState {
             }
 
             latest_deletions.insert(pubkey.clone(), event.clone());
+            let mut latest = self.latest_by_pubkey.lock().unwrap();
+            let evicted = match latest.get(&pubkey) {
+                Some(cached) if !event_is_newer_than_event(&cached.advertisement, &event) => {
+                    let cached = cached.clone();
+                    latest.remove(&pubkey);
+                    Some(cached)
+                }
+                _ => None,
+            };
+            drop(latest);
             drop(latest_deletions);
 
-            let cached = self.latest_by_pubkey.lock().unwrap().get(&pubkey).cloned();
-            let Some(cached) = cached else {
-                continue;
-            };
-
-            if !event_is_newer_than_event(&cached.advertisement, &event) {
+            if let Some(cached) = evicted {
                 debug!(
                     peer_pubkey = %pubkey,
                     event_id = %event.id,
                     deleted_event = %cached.advertisement.event_id,
                     "evicting advertisement after newer deletion"
                 );
-                self.latest_by_pubkey.lock().unwrap().remove(&pubkey);
                 self.handles.lock().unwrap().remove(&cached.handle);
                 self.discoveries.lock().unwrap().retain(|peer| peer.addr != cached.handle);
 
@@ -554,12 +575,23 @@ impl UdpHolePunchTransport {
     }
 
     fn spawn_discovery_workers(&mut self) {
+        let deletion_replay_window_secs = self
+            .config
+            .ad_expiration_secs()
+            .saturating_add(DISCOVERY_DELETION_REPLAY_SKEW_SECS);
         for relay_url in self.config.relays.clone() {
             let shared = self.shared.clone();
             let stats = self.stats.clone();
             let transport_id = self.transport_id;
             let task = tokio::spawn(async move {
-                run_discovery_worker(transport_id, relay_url, shared, stats).await;
+                run_discovery_worker(
+                    transport_id,
+                    relay_url,
+                    shared,
+                    stats,
+                    deletion_replay_window_secs,
+                )
+                .await;
             });
             self.relay_tasks.push(task);
         }
@@ -637,15 +669,31 @@ async fn run_discovery_worker(
     relay_url: String,
     shared: Arc<SharedState>,
     stats: Arc<UdpHolePunchStats>,
+    deletion_replay_window_secs: u64,
 ) {
     let mut reconnect_delay = DISCOVERY_RECONNECT_BASE_DELAY;
 
     loop {
-        match run_discovery_session(transport_id, &relay_url, shared.clone(), stats.clone()).await {
-            Ok(()) => {
-                reconnect_delay = DISCOVERY_RECONNECT_BASE_DELAY;
+        match run_discovery_session(
+            transport_id,
+            &relay_url,
+            shared.clone(),
+            stats.clone(),
+            deletion_replay_window_secs,
+        )
+        .await
+        {
+            DiscoverySessionOutcome::ConnectedThenClosed => {
+                reconnect_delay = next_discovery_reconnect_delay(reconnect_delay, true);
+                warn!(
+                    transport_id = %transport_id,
+                    relay = %relay_url,
+                    retry_in = ?reconnect_delay,
+                    "udp_holepunch discovery subscription closed; reconnecting"
+                );
+                tokio::time::sleep(reconnect_delay).await;
             }
-            Err(err) => {
+            DiscoverySessionOutcome::Failed(err) => {
                 warn!(
                     transport_id = %transport_id,
                     relay = %relay_url,
@@ -653,13 +701,10 @@ async fn run_discovery_worker(
                     retry_in = ?reconnect_delay,
                     "udp_holepunch discovery worker failed; reconnecting"
                 );
+                tokio::time::sleep(reconnect_delay).await;
+                reconnect_delay = next_discovery_reconnect_delay(reconnect_delay, false);
             }
         }
-
-        tokio::time::sleep(reconnect_delay).await;
-        reconnect_delay = reconnect_delay
-            .saturating_mul(2)
-            .min(DISCOVERY_RECONNECT_MAX_DELAY);
     }
 }
 
@@ -668,7 +713,8 @@ async fn run_discovery_session(
     relay_url: &str,
     shared: Arc<SharedState>,
     stats: Arc<UdpHolePunchStats>,
-) -> Result<(), String> {
+    deletion_replay_window_secs: u64,
+) -> DiscoverySessionOutcome {
     let client = match RelayClient::connect(&relay_url).await {
         Ok(client) => {
             stats.relays_connected.fetch_add(1, Ordering::Relaxed);
@@ -676,24 +722,31 @@ async fn run_discovery_session(
             client
         }
         Err(err) => {
-            return Err(format!("relay connect failed: {err}"));
+            return DiscoverySessionOutcome::Failed(format!("relay connect failed: {err}"));
         }
     };
 
     let advertisement_filter = service_advertisement_filter();
-    let deletion_filter = Filter::new().kind(Kind::EventDeletion);
+    let deletion_since = Timestamp::from(
+        Timestamp::now()
+            .as_secs()
+            .saturating_sub(deletion_replay_window_secs),
+    );
+    let deletion_filter = Filter::new()
+        .kind(Kind::EventDeletion)
+        .since(deletion_since);
     let mut sub = match client.subscribe(vec![advertisement_filter, deletion_filter]).await {
         Ok(sub) => sub,
         Err(err) => {
             client.disconnect().await;
-            return Err(format!("advertisement subscription failed: {err}"));
+            return DiscoverySessionOutcome::Failed(format!("advertisement subscription failed: {err}"));
         }
     };
 
     if let Err(err) = sub.wait_for_eose().await {
         let _ = sub.close().await;
         client.disconnect().await;
-        return Err(format!("advertisement subscription failed before EOSE: {err}"));
+        return DiscoverySessionOutcome::Failed(format!("advertisement subscription failed before EOSE: {err}"));
     }
 
     debug!(transport_id = %transport_id, relay = %relay_url, "udp_holepunch discovery subscription live");
@@ -731,7 +784,7 @@ async fn run_discovery_session(
 
     let _ = sub.close().await;
     client.disconnect().await;
-    Err("advertisement subscription closed".into())
+    DiscoverySessionOutcome::ConnectedThenClosed
 }
 
 fn event_is_newer_than_event(advertisement: &ServiceAdvertisement, event: &Event) -> bool {
@@ -752,6 +805,16 @@ fn discovery_event_is_newer(new: &Event, existing: &Event) -> bool {
     }
 
     new.id.to_hex() < existing.id.to_hex()
+}
+
+fn next_discovery_reconnect_delay(current: Duration, reset: bool) -> Duration {
+    if reset {
+        DISCOVERY_RECONNECT_BASE_DELAY
+    } else {
+        current
+            .saturating_mul(2)
+            .min(DISCOVERY_RECONNECT_MAX_DELAY)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1139,13 +1202,28 @@ mod tests {
         keys: &Keys,
         created_at: Timestamp,
     ) -> Event {
+        publish_test_service_advertisement_deletion_for_pubkey(
+            client,
+            keys,
+            keys.public_key(),
+            created_at,
+        )
+        .await
+    }
+
+    async fn publish_test_service_advertisement_deletion_for_pubkey(
+        client: &RelayClient,
+        signer_keys: &Keys,
+        advertised_pubkey: PublicKey,
+        created_at: Timestamp,
+    ) -> Event {
         let event = EventBuilder::delete(
             EventDeletionRequest::new()
-                .coordinate(service_advertisement_coordinate(keys.public_key()))
+                .coordinate(service_advertisement_coordinate(advertised_pubkey))
                 .reason(SERVICE_AD_CLEANUP_REASON),
         )
         .custom_created_at(created_at)
-        .sign_with_keys(keys)
+        .sign_with_keys(signer_keys)
         .unwrap();
         client.publish(event.clone()).await.unwrap();
         event
@@ -1346,9 +1424,15 @@ mod tests {
         let relay = TestRelay::start().await;
         let publisher = RelayClient::connect(relay.url()).await.unwrap();
         let keys = Keys::generate();
+        let now = Timestamp::now();
 
-        publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
-        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+        publish_test_service_advertisement(&publisher, &keys, now, None).await;
+        publish_test_service_advertisement_deletion(
+            &publisher,
+            &keys,
+            Timestamp::from(now.as_secs().saturating_add(1)),
+        )
+        .await;
 
         let config = UdpHolePunchConfig {
             relays: vec![relay.url().to_string()],
@@ -1379,6 +1463,7 @@ mod tests {
         let relay = TestRelay::start().await;
         let publisher = RelayClient::connect(relay.url()).await.unwrap();
         let keys = Keys::generate();
+        let now = Timestamp::now();
 
         let config = UdpHolePunchConfig {
             relays: vec![relay.url().to_string()],
@@ -1391,7 +1476,7 @@ mod tests {
         let mut transport = UdpHolePunchTransport::new(TransportId::new(46), None, config, packet_tx);
         transport.start_async().await.unwrap();
 
-        publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
+        publish_test_service_advertisement(&publisher, &keys, now, None).await;
 
         let handle = timeout(Duration::from_secs(5), async {
             loop {
@@ -1404,7 +1489,12 @@ mod tests {
         .await
         .expect("timed out waiting for discovery");
 
-        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+        publish_test_service_advertisement_deletion(
+            &publisher,
+            &keys,
+            Timestamp::from(now.as_secs().saturating_add(1)),
+        )
+        .await;
 
         timeout(Duration::from_secs(5), async {
             loop {
@@ -1426,12 +1516,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_ignores_deletion_from_wrong_pubkey() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+        let attacker_keys = Keys::generate();
+        let now = Timestamp::now();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(48), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        let initial_event =
+            publish_test_service_advertisement(&publisher, &responder_keys, now, None).await;
+        let handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(peer) = transport.discover().unwrap().into_iter().next() {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for initial discovery");
+
+        publish_test_service_advertisement_deletion_for_pubkey(
+            &publisher,
+            &attacker_keys,
+            responder_keys.public_key(),
+            Timestamp::from(now.as_secs().saturating_add(1)),
+        )
+        .await;
+
+        sleep(Duration::from_millis(200)).await;
+
+        let cached = transport
+            .shared
+            .handles
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .cloned()
+            .expect("advertisement should not be evicted by foreign deletion");
+        assert_eq!(cached.event_id, initial_event.id);
+
+        publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn discover_accepts_newer_advertisement_after_deletion() {
         init_test_logging();
 
         let relay = TestRelay::start().await;
         let publisher = RelayClient::connect(relay.url()).await.unwrap();
         let keys = Keys::generate();
+        let now = Timestamp::now();
 
         let config = UdpHolePunchConfig {
             relays: vec![relay.url().to_string()],
@@ -1444,7 +1594,7 @@ mod tests {
         let mut transport = UdpHolePunchTransport::new(TransportId::new(47), None, config, packet_tx);
         transport.start_async().await.unwrap();
 
-        let initial_event = publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
+        let initial_event = publish_test_service_advertisement(&publisher, &keys, now, None).await;
         let initial_handle = timeout(Duration::from_secs(5), async {
             loop {
                 if let Some(peer) = transport.discover().unwrap().into_iter().next() {
@@ -1456,7 +1606,12 @@ mod tests {
         .await
         .expect("timed out waiting for initial discovery");
 
-        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+        publish_test_service_advertisement_deletion(
+            &publisher,
+            &keys,
+            Timestamp::from(now.as_secs().saturating_add(1)),
+        )
+        .await;
         timeout(Duration::from_secs(5), async {
             loop {
                 if !transport.shared.handles.lock().unwrap().contains_key(&initial_handle) {
@@ -1471,7 +1626,7 @@ mod tests {
         let refreshed_event = publish_test_service_advertisement(
             &publisher,
             &keys,
-            Timestamp::from(30),
+            Timestamp::from(now.as_secs().saturating_add(2)),
             None,
         )
         .await;
@@ -1503,6 +1658,15 @@ mod tests {
         publisher.disconnect().await;
         relay.shutdown().await;
         transport.stop_async().await.unwrap();
+    }
+
+    #[test]
+    fn discovery_reconnect_delay_resets_after_healthy_session() {
+        let capped = next_discovery_reconnect_delay(Duration::from_secs(16), false);
+        assert_eq!(capped, DISCOVERY_RECONNECT_MAX_DELAY);
+
+        let reset = next_discovery_reconnect_delay(capped, true);
+        assert_eq!(reset, DISCOVERY_RECONNECT_BASE_DELAY);
     }
 
     #[tokio::test]
