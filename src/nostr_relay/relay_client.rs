@@ -6,11 +6,11 @@
 use super::NostrError;
 use futures::{SinkExt, StreamExt};
 use nostr::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout, timeout_at};
 use tracing::{debug, trace, warn};
 
 /// A connection to a single Nostr relay.
@@ -31,16 +31,21 @@ pub struct RelayClient {
 
 /// Internal state for routing messages to a subscription.
 struct SubscriptionSender {
-    event_tx: mpsc::Sender<Event>,
-    eose_tx: Option<oneshot::Sender<()>>,
+    item_tx: mpsc::Sender<SubscriptionItem>,
+}
+
+enum SubscriptionItem {
+    Event(Event),
+    Eose,
 }
 
 /// A live subscription that receives events matching its filter.
 pub struct Subscription {
     id: SubscriptionId,
     relay_url: String,
-    event_rx: mpsc::Receiver<Event>,
-    eose_rx: Option<oneshot::Receiver<()>>,
+    item_rx: mpsc::Receiver<SubscriptionItem>,
+    pending_events: VecDeque<Event>,
+    saw_eose: bool,
     write_tx: mpsc::Sender<String>,
 }
 
@@ -204,16 +209,14 @@ impl RelayClient {
         let sub_id = SubscriptionId::generate();
         trace!("subscribing with id {sub_id}");
 
-        let (event_tx, event_rx) = mpsc::channel(256);
-        let (eose_tx, eose_rx) = oneshot::channel();
+        let (item_tx, item_rx) = mpsc::channel(256);
 
         {
             let mut subs = self.subscriptions.lock().await;
             subs.insert(
                 sub_id.clone(),
                 SubscriptionSender {
-                    event_tx,
-                    eose_tx: Some(eose_tx),
+                    item_tx,
                 },
             );
         }
@@ -228,8 +231,9 @@ impl RelayClient {
         Ok(Subscription {
             id: sub_id,
             relay_url: self.url.clone(),
-            event_rx,
-            eose_rx: Some(eose_rx),
+            item_rx,
+            pending_events: VecDeque::new(),
+            saw_eose: false,
             write_tx: self.write_tx.clone(),
         })
     }
@@ -263,7 +267,7 @@ impl RelayClient {
                 trace!(relay = %relay_url, subscription_id = %subscription_id, event_id = %event.id, "received EVENT for subscription");
                 let subs = subscriptions.lock().await;
                 if let Some(sub) = subs.get(&subscription_id) {
-                    let _ = sub.event_tx.send(event.into_owned()).await;
+                    let _ = sub.item_tx.send(SubscriptionItem::Event(event.into_owned())).await;
                 }
             }
             RelayMessage::Ok {
@@ -279,11 +283,9 @@ impl RelayClient {
             }
             RelayMessage::EndOfStoredEvents(sub_id) => {
                 trace!(relay = %relay_url, subscription_id = %sub_id, "received EOSE for subscription");
-                let mut subs = subscriptions.lock().await;
-                if let Some(sub) = subs.get_mut(&sub_id) {
-                    if let Some(eose_tx) = sub.eose_tx.take() {
-                        let _ = eose_tx.send(());
-                    }
+                let subs = subscriptions.lock().await;
+                if let Some(sub) = subs.get(&sub_id) {
+                    let _ = sub.item_tx.send(SubscriptionItem::Eose).await;
                 }
             }
             RelayMessage::Notice(message) => {
@@ -323,7 +325,17 @@ impl Subscription {
     /// Wait for the next event. Returns `None` if the subscription
     /// or connection is closed.
     pub async fn next(&mut self) -> Option<Event> {
-        self.event_rx.recv().await
+        if let Some(event) = self.pending_events.pop_front() {
+            return Some(event);
+        }
+
+        loop {
+            match self.item_rx.recv().await {
+                Some(SubscriptionItem::Event(event)) => return Some(event),
+                Some(SubscriptionItem::Eose) => self.saw_eose = true,
+                None => return None,
+            }
+        }
     }
 
     /// Wait for the next event and include which relay delivered it.
@@ -335,11 +347,40 @@ impl Subscription {
     /// finished sending stored/historical events. After this, only
     /// live events will arrive via [`next()`](Self::next).
     pub async fn wait_for_eose(&mut self) -> Result<(), NostrError> {
-        if let Some(rx) = self.eose_rx.take() {
-            rx.await
-                .map_err(|_| NostrError::ConnectionClosedAt(self.relay_url.clone()))
-        } else {
-            Ok(()) // already received
+        if self.saw_eose {
+            return Ok(());
+        }
+
+        let stored_events = self.wait_for_stored_events(Duration::from_secs(365 * 24 * 60 * 60)).await?;
+        self.pending_events.extend(stored_events);
+        Ok(())
+    }
+
+    /// Collect stored events until EOSE arrives or the timeout expires.
+    pub async fn wait_for_stored_events(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> Result<Vec<Event>, NostrError> {
+        if self.saw_eose {
+            return Ok(self.pending_events.drain(..).collect());
+        }
+
+        let mut stored_events = Vec::new();
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            let item = timeout_at(deadline, self.item_rx.recv())
+                .await
+                .map_err(|_| NostrError::EoseTimeout)?;
+            match item {
+                Some(SubscriptionItem::Event(event)) => stored_events.push(event),
+                Some(SubscriptionItem::Eose) => {
+                    self.saw_eose = true;
+                    return Ok(stored_events);
+                }
+                None => {
+                    return Err(NostrError::ConnectionClosedAt(self.relay_url.clone()));
+                }
+            }
         }
     }
 
@@ -544,6 +585,115 @@ mod tests {
         // No more events.
         let result = timeout(Duration::from_millis(200), sub.next()).await;
         assert!(result.is_err(), "should only receive one event");
+
+        sub.close().await.unwrap();
+        client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_mixed_subscription_collects_stored_events_before_eose() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+        let coordinate = Coordinate::new(Kind::Custom(30078), keys.public_key())
+            .identifier("udp-service-v1/fips");
+
+        let advertisement = EventBuilder::new(Kind::Custom(30078), "")
+            .tag(Tag::identifier("udp-service-v1/fips"))
+            .tag(Tag::custom(
+                TagKind::custom("stun"),
+                ["stun.example.com:3478"],
+            ))
+            .sign_with_keys(&keys)
+            .unwrap();
+        client.publish(advertisement.clone()).await.unwrap();
+
+        let deletion = EventBuilder::delete(
+            EventDeletionRequest::new()
+                .coordinate(coordinate.clone())
+                .reason("cleanup"),
+        )
+        .sign_with_keys(&keys)
+        .unwrap();
+        client.publish(deletion.clone()).await.unwrap();
+
+        let filters = vec![
+            Filter::new()
+                .kind(Kind::Custom(30078))
+                .author(keys.public_key())
+                .identifier("udp-service-v1/fips"),
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .author(keys.public_key())
+                .coordinate(&coordinate),
+        ];
+        let mut sub = client.subscribe(filters).await.unwrap();
+        let stored = sub
+            .wait_for_stored_events(Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].id, advertisement.id);
+        assert_eq!(stored[1].id, deletion.id);
+
+        sub.close().await.unwrap();
+        client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_wait_for_eose_preserves_mixed_stored_events_for_next() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+        let coordinate = Coordinate::new(Kind::Custom(30078), keys.public_key())
+            .identifier("udp-service-v1/fips");
+
+        let advertisement = EventBuilder::new(Kind::Custom(30078), "")
+            .tag(Tag::identifier("udp-service-v1/fips"))
+            .sign_with_keys(&keys)
+            .unwrap();
+        client.publish(advertisement.clone()).await.unwrap();
+
+        let deletion = EventBuilder::delete(
+            EventDeletionRequest::new()
+                .coordinate(coordinate.clone())
+                .reason("cleanup"),
+        )
+        .sign_with_keys(&keys)
+        .unwrap();
+        client.publish(deletion.clone()).await.unwrap();
+
+        let filters = vec![
+            Filter::new()
+                .kind(Kind::Custom(30078))
+                .author(keys.public_key())
+                .identifier("udp-service-v1/fips"),
+            Filter::new()
+                .kind(Kind::EventDeletion)
+                .author(keys.public_key())
+                .coordinate(&coordinate),
+        ];
+        let mut sub = client.subscribe(filters).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        let first = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("timed out")
+            .expect("closed");
+        let second = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("timed out")
+            .expect("closed");
+
+        assert_eq!(first.id, advertisement.id);
+        assert_eq!(second.id, deletion.id);
 
         sub.close().await.unwrap();
         client.disconnect().await;

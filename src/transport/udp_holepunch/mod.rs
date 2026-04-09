@@ -42,6 +42,8 @@ use tracing::{debug, error, info, warn};
 
 const DISCOVERY_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 const DISCOVERY_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+const TRANSPORT_SERVICE_AD_KIND: u16 = 30078;
+const TRANSPORT_SERVICE_TAG: &str = "udp-service-v1/fips";
 
 /// Transport-local stats for the initial udp_holepunch integration.
 #[derive(Debug, Default, Serialize)]
@@ -80,6 +82,7 @@ struct CachedAdvertisement {
 struct SharedState {
     seen_event_ids: StdMutex<HashSet<String>>,
     latest_by_pubkey: StdMutex<HashMap<String, CachedAdvertisement>>,
+    latest_deletion_by_pubkey: StdMutex<HashMap<String, Event>>,
     handles: StdMutex<HashMap<TransportAddr, ServiceAdvertisement>>,
     discoveries: StdMutex<Vec<DiscoveredPeer>>,
     connect_states: StdMutex<HashMap<TransportAddr, ConnectionState>>,
@@ -92,6 +95,7 @@ impl SharedState {
         Self {
             seen_event_ids: StdMutex::new(HashSet::new()),
             latest_by_pubkey: StdMutex::new(HashMap::new()),
+            latest_deletion_by_pubkey: StdMutex::new(HashMap::new()),
             handles: StdMutex::new(HashMap::new()),
             discoveries: StdMutex::new(Vec::new()),
             connect_states: StdMutex::new(HashMap::new()),
@@ -124,6 +128,21 @@ impl SharedState {
         }
 
         let pubkey = advertisement.peer_pubkey.to_hex();
+        let deletion_is_newer = self
+            .latest_deletion_by_pubkey
+            .lock()
+            .unwrap()
+            .get(&pubkey)
+            .is_some_and(|deletion| !event_is_newer_than_event(&advertisement, deletion));
+        if deletion_is_newer {
+            debug!(
+                peer_pubkey = %pubkey,
+                event_id = %advertisement.event_id,
+                "ignoring advertisement superseded by a newer deletion"
+            );
+            return;
+        }
+
         let mut latest = self.latest_by_pubkey.lock().unwrap();
         match latest.get_mut(&pubkey) {
             Some(existing) => {
@@ -158,6 +177,67 @@ impl SharedState {
                 );
                 self.enqueue_discovery(transport_id, handle, advertisement.peer_pubkey);
                 stats.advertisements_updated.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn record_advertisement_deletion(&self, event: Event) {
+        let event_id = event.id.to_hex();
+        {
+            let mut seen = self.seen_event_ids.lock().unwrap();
+            if !seen.insert(event_id.clone()) {
+                debug!(event_id = %event_id, "ignoring duplicate advertisement deletion event");
+                return;
+            }
+        }
+
+        let coordinates: Vec<_> = event
+            .tags
+            .coordinates()
+            .filter(|coordinate| {
+                coordinate.kind.as_u16() == TRANSPORT_SERVICE_AD_KIND
+                    && coordinate.identifier == TRANSPORT_SERVICE_TAG
+            })
+            .cloned()
+            .collect();
+        if coordinates.is_empty() {
+            return;
+        }
+
+        for coordinate in coordinates {
+            let pubkey = coordinate.public_key.to_hex();
+
+            let mut latest_deletions = self.latest_deletion_by_pubkey.lock().unwrap();
+            let should_replace = latest_deletions
+                .get(&pubkey)
+                .is_none_or(|existing| discovery_event_is_newer(&event, existing));
+            if !should_replace {
+                continue;
+            }
+
+            latest_deletions.insert(pubkey.clone(), event.clone());
+            drop(latest_deletions);
+
+            let cached = self.latest_by_pubkey.lock().unwrap().get(&pubkey).cloned();
+            let Some(cached) = cached else {
+                continue;
+            };
+
+            if !event_is_newer_than_event(&cached.advertisement, &event) {
+                debug!(
+                    peer_pubkey = %pubkey,
+                    event_id = %event.id,
+                    deleted_event = %cached.advertisement.event_id,
+                    "evicting advertisement after newer deletion"
+                );
+                self.latest_by_pubkey.lock().unwrap().remove(&pubkey);
+                self.handles.lock().unwrap().remove(&cached.handle);
+                self.discoveries.lock().unwrap().retain(|peer| peer.addr != cached.handle);
+
+                let has_connection = self.connections.lock().unwrap().contains_key(&cached.handle);
+                if !has_connection {
+                    self.connect_states.lock().unwrap().remove(&cached.handle);
+                }
             }
         }
     }
@@ -600,8 +680,9 @@ async fn run_discovery_session(
         }
     };
 
-    let filter = service_advertisement_filter();
-    let mut sub = match client.subscribe(vec![filter]).await {
+    let advertisement_filter = service_advertisement_filter();
+    let deletion_filter = Filter::new().kind(Kind::EventDeletion);
+    let mut sub = match client.subscribe(vec![advertisement_filter, deletion_filter]).await {
         Ok(sub) => sub,
         Err(err) => {
             client.disconnect().await;
@@ -618,22 +699,32 @@ async fn run_discovery_session(
     debug!(transport_id = %transport_id, relay = %relay_url, "udp_holepunch discovery subscription live");
 
     while let Some(event) = sub.next().await {
-        if event.is_expired() {
-            debug!(
-                transport_id = %transport_id,
-                relay = %relay_url,
-                event_id = %event.id,
-                "ignoring expired udp_holepunch advertisement"
-            );
-            continue;
-        }
+        match event.kind.as_u16() {
+            TRANSPORT_SERVICE_AD_KIND => {
+                if event.is_expired() {
+                    debug!(
+                        transport_id = %transport_id,
+                        relay = %relay_url,
+                        event_id = %event.id,
+                        "ignoring expired udp_holepunch advertisement"
+                    );
+                    continue;
+                }
 
-        match parse_service_advertisement(&event) {
-            Ok(advertisement) => {
-                shared.record_advertisement(transport_id, advertisement, &stats);
+                match parse_service_advertisement(&event) {
+                    Ok(advertisement) => {
+                        shared.record_advertisement(transport_id, advertisement, &stats);
+                    }
+                    Err(err) => {
+                        debug!(transport_id = %transport_id, relay = %relay_url, event_id = %event.id, error = %err, "ignoring non-advertisement event in udp_holepunch discovery worker");
+                    }
+                }
             }
-            Err(err) => {
-                debug!(transport_id = %transport_id, relay = %relay_url, event_id = %event.id, error = %err, "ignoring non-advertisement event in udp_holepunch discovery worker");
+            value if value == Kind::EventDeletion.as_u16() => {
+                shared.record_advertisement_deletion(event);
+            }
+            _ => {
+                debug!(transport_id = %transport_id, relay = %relay_url, event_id = %event.id, "ignoring unrelated event in udp_holepunch discovery worker");
             }
         }
     }
@@ -641,6 +732,26 @@ async fn run_discovery_session(
     let _ = sub.close().await;
     client.disconnect().await;
     Err("advertisement subscription closed".into())
+}
+
+fn event_is_newer_than_event(advertisement: &ServiceAdvertisement, event: &Event) -> bool {
+    let advertisement_secs = advertisement.created_at.as_secs();
+    let event_secs = event.created_at.as_secs();
+    if advertisement_secs != event_secs {
+        return advertisement_secs > event_secs;
+    }
+
+    advertisement.event_id.to_hex() < event.id.to_hex()
+}
+
+fn discovery_event_is_newer(new: &Event, existing: &Event) -> bool {
+    let new_secs = new.created_at.as_secs();
+    let existing_secs = existing.created_at.as_secs();
+    if new_secs != existing_secs {
+        return new_secs > existing_secs;
+    }
+
+    new.id.to_hex() < existing.id.to_hex()
 }
 
 // ---------------------------------------------------------------------------
@@ -981,7 +1092,9 @@ async fn run_responder_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::holepunch::signaling::{SERVICE_AD_CLEANUP_REASON, publish_service_advertisement};
+    use crate::holepunch::signaling::{
+        SERVICE_AD_CLEANUP_REASON, publish_service_advertisement, service_advertisement_coordinate,
+    };
     use crate::nostr_relay::init_test_logging;
     use crate::nostr_relay::test_relay::TestRelay;
     use crate::stun::StunServer;
@@ -1019,6 +1132,23 @@ mod tests {
             Some(Timestamp::from(now.as_secs().saturating_sub(1))),
         )
         .await;
+    }
+
+    async fn publish_test_service_advertisement_deletion(
+        client: &RelayClient,
+        keys: &Keys,
+        created_at: Timestamp,
+    ) -> Event {
+        let event = EventBuilder::delete(
+            EventDeletionRequest::new()
+                .coordinate(service_advertisement_coordinate(keys.public_key()))
+                .reason(SERVICE_AD_CLEANUP_REASON),
+        )
+        .custom_created_at(created_at)
+        .sign_with_keys(keys)
+        .unwrap();
+        client.publish(event.clone()).await.unwrap();
+        event
     }
 
     #[test]
@@ -1205,6 +1335,172 @@ mod tests {
         assert_ne!(cached_new_event_id, cached_initial_event_id);
 
         publisher_after_drop.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_replay_ignores_advertisement_deleted_before_startup() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
+        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(45), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        sleep(Duration::from_millis(200)).await;
+
+        assert!(transport.discover().unwrap().is_empty());
+        assert!(transport.shared.latest_by_pubkey.lock().unwrap().is_empty());
+        assert!(transport.shared.handles.lock().unwrap().is_empty());
+
+        publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_evicts_cached_advertisement_after_newer_deletion() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(46), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
+
+        let handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(peer) = transport.discover().unwrap().into_iter().next() {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for discovery");
+
+        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !transport.shared.handles.lock().unwrap().contains_key(&handle) {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for advertisement eviction");
+
+        assert!(transport.discover().unwrap().is_empty());
+        assert!(transport.shared.latest_by_pubkey.lock().unwrap().is_empty());
+
+        publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_accepts_newer_advertisement_after_deletion() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(47), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        let initial_event = publish_test_service_advertisement(&publisher, &keys, Timestamp::from(10), None).await;
+        let initial_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(peer) = transport.discover().unwrap().into_iter().next() {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for initial discovery");
+
+        publish_test_service_advertisement_deletion(&publisher, &keys, Timestamp::from(20)).await;
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if !transport.shared.handles.lock().unwrap().contains_key(&initial_handle) {
+                    break;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for deletion eviction");
+
+        let refreshed_event = publish_test_service_advertisement(
+            &publisher,
+            &keys,
+            Timestamp::from(30),
+            None,
+        )
+        .await;
+
+        let refreshed_handle = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(peer) = transport.discover().unwrap().into_iter().next() {
+                    break peer.addr;
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for refreshed discovery");
+
+        assert_ne!(refreshed_handle, initial_handle);
+
+        let refreshed_ad = transport
+            .shared
+            .handles
+            .lock()
+            .unwrap()
+            .get(&refreshed_handle)
+            .cloned()
+            .expect("missing refreshed advertisement");
+        assert_eq!(refreshed_ad.event_id, refreshed_event.id);
+        assert_ne!(refreshed_ad.event_id, initial_event.id);
+
+        publisher.disconnect().await;
         relay.shutdown().await;
         transport.stop_async().await.unwrap();
     }

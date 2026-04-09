@@ -49,8 +49,11 @@ const RELAY_PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 /// One-shot advertisement discovery should stay quick even if some relays are slow.
 const DISCOVERY_EOSE_TIMEOUT: Duration = Duration::from_millis(750);
 
-/// After EOSE, drain any already-buffered stored events without lingering.
-const DISCOVERY_DRAIN_IDLE_TIMEOUT: Duration = Duration::from_millis(25);
+#[derive(Debug, Default)]
+struct ServiceDiscoveryState {
+    advertisement: Option<Event>,
+    deletion: Option<Event>,
+}
 
 /// Signal subscriptions only need a short replay window for in-flight events.
 const SIGNAL_SUBSCRIPTION_SINCE_SECS: u64 = 5;
@@ -211,49 +214,45 @@ pub async fn discover_service(
     client: &RelayClient,
     responder_pubkey: &PublicKey,
 ) -> Result<Option<Event>, NostrError> {
-    let filter = service_advertisement_filter().author(*responder_pubkey);
+    let state = discover_service_state(client, responder_pubkey).await?;
+    Ok(resolve_service_discovery_state(state))
+}
+
+async fn discover_service_state(
+    client: &RelayClient,
+    responder_pubkey: &PublicKey,
+) -> Result<ServiceDiscoveryState, NostrError> {
+    let coordinate = service_advertisement_coordinate(*responder_pubkey);
+    let advertisement_filter = service_advertisement_filter().author(*responder_pubkey);
+    let deletion_filter = Filter::new()
+        .kind(Kind::EventDeletion)
+        .author(*responder_pubkey)
+        .coordinate(&coordinate);
 
     debug!(relay = %client.url(), "discovering service for {responder_pubkey}");
 
-    let mut sub = client.subscribe(vec![filter]).await?;
-    match tokio::time::timeout(DISCOVERY_EOSE_TIMEOUT, sub.wait_for_eose()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
+    let mut sub = client
+        .subscribe(vec![advertisement_filter, deletion_filter])
+        .await?;
+    let stored_events = match sub.wait_for_stored_events(DISCOVERY_EOSE_TIMEOUT).await {
+        Ok(events) => events,
+        Err(err) => {
             let _ = sub.close().await;
             return Err(err);
         }
-        Err(_) => {
-            let _ = sub.close().await;
-            return Err(NostrError::EoseTimeout);
-        }
-    }
+    };
 
-    let mut best_event = None;
-    loop {
-        match tokio::time::timeout(DISCOVERY_DRAIN_IDLE_TIMEOUT, sub.next()).await {
-            Ok(Some(event)) => {
-                if event.is_expired() {
-                    debug!(
-                        relay = %client.url(),
-                        event_id = %event.id,
-                        "ignoring expired service advertisement"
-                    );
-                    continue;
-                }
-
-                let should_replace = best_event
-                    .as_ref()
-                    .is_none_or(|existing| advertisement_event_is_newer(&event, existing));
-                if should_replace {
-                    best_event = Some(event);
-                }
-            }
-            Ok(None) => break,
-            Err(_) => break,
-        }
+    let mut state = ServiceDiscoveryState::default();
+    for event in stored_events {
+        record_service_discovery_event(client, &coordinate, &mut state, event);
     }
 
     sub.close().await?;
+
+    let best_event = resolve_service_discovery_state(ServiceDiscoveryState {
+        advertisement: state.advertisement.clone(),
+        deletion: state.deletion.clone(),
+    });
 
     if let Some(ref e) = best_event {
         debug!(relay = %client.url(), event_id = %e.id, "discovered service advertisement");
@@ -261,7 +260,49 @@ pub async fn discover_service(
         debug!(relay = %client.url(), "no service advertisement found for {responder_pubkey}");
     }
 
-    Ok(best_event)
+    Ok(state)
+}
+
+fn record_service_discovery_event(
+    client: &RelayClient,
+    coordinate: &Coordinate,
+    state: &mut ServiceDiscoveryState,
+    event: Event,
+) {
+    match event.kind.as_u16() {
+        SERVICE_AD_KIND => {
+            if event.is_expired() {
+                debug!(
+                    relay = %client.url(),
+                    event_id = %event.id,
+                    "ignoring expired service advertisement"
+                );
+                return;
+            }
+
+            let should_replace = state
+                .advertisement
+                .as_ref()
+                .is_none_or(|existing| event_is_newer(&event, existing));
+            if should_replace {
+                state.advertisement = Some(event);
+            }
+        }
+        value if value == Kind::EventDeletion.as_u16() => {
+            if !deletion_targets_coordinate(&event, coordinate) {
+                return;
+            }
+
+            let should_replace = state
+                .deletion
+                .as_ref()
+                .is_none_or(|existing| event_is_newer(&event, existing));
+            if should_replace {
+                state.deletion = Some(event);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Build the base filter for FIPS responder advertisements.
@@ -271,7 +312,7 @@ pub fn service_advertisement_filter() -> Filter {
         .identifier(FIPS_SERVICE_TAG)
 }
 
-fn advertisement_event_is_newer(new: &Event, existing: &Event) -> bool {
+fn event_is_newer(new: &Event, existing: &Event) -> bool {
     let new_secs = new.created_at.as_secs();
     let existing_secs = existing.created_at.as_secs();
     if new_secs != existing_secs {
@@ -279,6 +320,24 @@ fn advertisement_event_is_newer(new: &Event, existing: &Event) -> bool {
     }
 
     new.id.to_hex() < existing.id.to_hex()
+}
+
+fn deletion_targets_coordinate(event: &Event, coordinate: &Coordinate) -> bool {
+    event.tags.coordinates().any(|tagged| *tagged == *coordinate)
+}
+
+fn resolve_service_discovery_state(state: ServiceDiscoveryState) -> Option<Event> {
+    match (state.advertisement, state.deletion) {
+        (Some(advertisement), Some(deletion)) => {
+            if event_is_newer(&advertisement, &deletion) {
+                Some(advertisement)
+            } else {
+                None
+            }
+        }
+        (Some(advertisement), None) => Some(advertisement),
+        (None, _) => None,
+    }
 }
 
 pub(crate) fn advertisement_is_newer(
@@ -313,25 +372,44 @@ pub async fn discover_service_across_relays(
     let results = join_all(
         relays
             .iter()
-            .map(|relay| discover_service_typed(relay, responder_pubkey)),
+            .map(|relay| discover_service_state(relay, responder_pubkey)),
     )
     .await;
 
-    let mut best = None;
+    let mut best_advertisement = None;
+    let mut best_deletion = None;
     for (relay, result) in relays.iter().zip(results) {
         match result {
-            Ok(Some(advertisement)) => {
-                let should_replace = best
-                    .as_ref()
-                    .is_none_or(|existing| advertisement_is_newer(&advertisement, existing));
-                if should_replace {
-                    best = Some(advertisement);
+            Ok(state) => {
+                if let Some(advertisement) = state.advertisement {
+                    let should_replace = best_advertisement
+                        .as_ref()
+                        .is_none_or(|existing| event_is_newer(&advertisement, existing));
+                    if should_replace {
+                        best_advertisement = Some(advertisement);
+                    }
+                }
+
+                if let Some(deletion) = state.deletion {
+                    let should_replace = best_deletion
+                        .as_ref()
+                        .is_none_or(|existing| event_is_newer(&deletion, existing));
+                    if should_replace {
+                        best_deletion = Some(deletion);
+                    }
                 }
             }
-            Ok(None) => continue,
             Err(e) => warn!(relay = %relay.url(), error = %e, "service discovery failed on relay"),
         }
     }
+
+    let best = resolve_service_discovery_state(ServiceDiscoveryState {
+        advertisement: best_advertisement,
+        deletion: best_deletion,
+    })
+    .map(|event| parse_service_advertisement(&event))
+    .transpose()
+    .map_err(HolePunchError::Nostr)?;
 
     best.ok_or(HolePunchError::AdvertisementNotFound)
 }
@@ -894,6 +972,22 @@ mod tests {
         event
     }
 
+    async fn publish_test_service_advertisement_deletion(
+        client: &RelayClient,
+        keys: &Keys,
+        created_at: Timestamp,
+    ) -> Event {
+        let request = EventDeletionRequest::new()
+            .coordinate(service_advertisement_coordinate(keys.public_key()))
+            .reason(SERVICE_AD_CLEANUP_REASON);
+        let event = EventBuilder::delete(request)
+            .custom_created_at(created_at)
+            .sign_with_keys(keys)
+            .unwrap();
+        client.publish(event.clone()).await.unwrap();
+        event
+    }
+
     #[tokio::test]
     async fn service_advertisement_roundtrip() {
         init_test_logging();
@@ -994,6 +1088,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discover_service_ignores_deleted_advertisements() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+
+        publish_test_service_advertisement(&client, &responder_keys, Timestamp::from(10), None).await;
+        publish_test_service_advertisement_deletion(&client, &responder_keys, Timestamp::from(20))
+            .await;
+
+        let discovered = discover_service_typed(&client, &responder_keys.public_key())
+            .await
+            .unwrap();
+        assert!(discovered.is_none(), "deleted advertisement should be ignored");
+
+        client.disconnect().await;
+        relay.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn discover_service_across_relays_prefers_newest_valid_advertisement() {
         init_test_logging();
 
@@ -1033,6 +1148,82 @@ mod tests {
         newer_client.disconnect().await;
         older_relay.shutdown().await;
         newer_relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discover_service_across_relays_rejects_stale_advertisement_deleted_elsewhere() {
+        init_test_logging();
+
+        let stale_relay = TestRelay::start().await;
+        let deletion_relay = TestRelay::start().await;
+        let stale_client = RelayClient::connect(stale_relay.url()).await.unwrap();
+        let deletion_client = RelayClient::connect(deletion_relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+
+        publish_test_service_advertisement(&stale_client, &responder_keys, Timestamp::from(10), None)
+            .await;
+        publish_test_service_advertisement_deletion(
+            &deletion_client,
+            &responder_keys,
+            Timestamp::from(20),
+        )
+        .await;
+
+        let discovered = discover_service_across_relays(
+            &[&stale_client, &deletion_client],
+            &responder_keys.public_key(),
+        )
+        .await;
+        assert!(matches!(discovered, Err(HolePunchError::AdvertisementNotFound)));
+
+        stale_client.disconnect().await;
+        deletion_client.disconnect().await;
+        stale_relay.shutdown().await;
+        deletion_relay.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discover_service_across_relays_prefers_newer_advertisement_over_older_deletion() {
+        init_test_logging();
+
+        let stale_relay = TestRelay::start().await;
+        let deletion_relay = TestRelay::start().await;
+        let refreshed_relay = TestRelay::start().await;
+        let stale_client = RelayClient::connect(stale_relay.url()).await.unwrap();
+        let deletion_client = RelayClient::connect(deletion_relay.url()).await.unwrap();
+        let refreshed_client = RelayClient::connect(refreshed_relay.url()).await.unwrap();
+        let responder_keys = Keys::generate();
+
+        publish_test_service_advertisement(&stale_client, &responder_keys, Timestamp::from(10), None)
+            .await;
+        publish_test_service_advertisement_deletion(
+            &deletion_client,
+            &responder_keys,
+            Timestamp::from(20),
+        )
+        .await;
+        let refreshed = publish_test_service_advertisement(
+            &refreshed_client,
+            &responder_keys,
+            Timestamp::from(30),
+            None,
+        )
+        .await;
+
+        let discovered = discover_service_across_relays(
+            &[&stale_client, &deletion_client, &refreshed_client],
+            &responder_keys.public_key(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(discovered.event_id, refreshed.id);
+
+        stale_client.disconnect().await;
+        deletion_client.disconnect().await;
+        refreshed_client.disconnect().await;
+        stale_relay.shutdown().await;
+        deletion_relay.shutdown().await;
+        refreshed_relay.shutdown().await;
     }
 
     #[tokio::test]
