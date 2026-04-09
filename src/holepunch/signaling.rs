@@ -46,6 +46,9 @@ const SIGNAL_KIND: u16 = 21059;
 /// Per-relay deadline for waiting on an EVENT `OK` response.
 const RELAY_PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Signal subscriptions only need a short replay window for in-flight events.
+const SIGNAL_SUBSCRIPTION_SINCE_SECS: u64 = 5;
+
 /// Default reason for deleting completed or abandoned signaling events.
 pub const SIGNAL_CLEANUP_REASON: &str = "session concluded";
 
@@ -268,11 +271,17 @@ pub async fn subscribe_signals(
     client: &RelayClient,
     my_pubkey: &PublicKey,
 ) -> Result<Subscription, NostrError> {
+    let since = Timestamp::from(
+        Timestamp::now()
+            .as_secs()
+            .saturating_sub(SIGNAL_SUBSCRIPTION_SINCE_SECS),
+    );
     let filter = Filter::new()
         .kind(Kind::Custom(SIGNAL_KIND))
-        .pubkey(*my_pubkey);
+        .pubkey(*my_pubkey)
+        .since(since);
 
-    debug!(relay = %client.url(), "subscribing for signals addressed to {my_pubkey}");
+    debug!(relay = %client.url(), since = since.as_secs(), "subscribing for signals addressed to {my_pubkey}");
     let mut sub = client.subscribe(vec![filter]).await?;
     sub.wait_for_eose().await?;
     Ok(sub)

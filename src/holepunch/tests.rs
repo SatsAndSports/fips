@@ -8,7 +8,8 @@ use crate::holepunch::orchestrator::{
     wait_for_first_offer,
 };
 use crate::holepunch::signaling::{
-    SIGNAL_CLEANUP_REASON, discover_service_across_relays, publish_service_advertisement,
+    Offer, SIGNAL_CLEANUP_REASON, discover_service_across_relays, publish_service_advertisement,
+    send_offer,
 };
 use crate::nostr_relay::RelayClient;
 use crate::nostr_relay::init_test_logging;
@@ -251,4 +252,69 @@ async fn initiator_timeout_retries_once_and_cleans_up_each_offer() {
     responder_client.disconnect().await;
     relay.shutdown().await;
     stun_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn responder_ignores_stale_offer_and_accepts_fresh_one() {
+    init_test_logging();
+
+    let relay = TestRelay::start().await;
+    let responder_keys = Keys::generate();
+    let initiator_keys = Keys::generate();
+    let reply_keys = Keys::generate();
+
+    let responder_client = RelayClient::connect(relay.url()).await.unwrap();
+    let initiator_client = RelayClient::connect(relay.url()).await.unwrap();
+    let mut responder_subs = subscribe_signals_all(&[&responder_client], responder_keys.public_key())
+        .await
+        .unwrap();
+
+    let stale_offer = Offer {
+        session_id: "stale-session".into(),
+        reflexive_addr: "1.2.3.4:1111".parse().unwrap(),
+        local_addr: "10.0.0.2:1111".parse().unwrap(),
+        stun_server: "stun.example.com:3478".into(),
+        reply_pubkey: reply_keys.public_key(),
+        timestamp: Timestamp::now().as_secs() - 120,
+    };
+    let fresh_offer = Offer {
+        session_id: "fresh-session".into(),
+        timestamp: Timestamp::now().as_secs(),
+        ..stale_offer.clone()
+    };
+
+    send_offer(
+        &initiator_client,
+        &initiator_keys,
+        &responder_keys.public_key(),
+        &stale_offer,
+    )
+    .await
+    .unwrap();
+    send_offer(
+        &initiator_client,
+        &initiator_keys,
+        &responder_keys.public_key(),
+        &fresh_offer,
+    )
+    .await
+    .unwrap();
+
+    let incoming_offer = wait_for_first_offer(
+        &mut responder_subs,
+        &responder_keys,
+        Some(Duration::from_secs(2)),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(incoming_offer.offer.session_id, fresh_offer.session_id);
+    assert_eq!(incoming_offer.offer.timestamp, fresh_offer.timestamp);
+
+    for sub in responder_subs {
+        sub.close().await.unwrap();
+    }
+    initiator_client.disconnect().await;
+    responder_client.disconnect().await;
+    relay.shutdown().await;
 }

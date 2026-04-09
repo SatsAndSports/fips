@@ -20,6 +20,9 @@ use tokio::net::UdpSocket;
 use tokio::time::timeout;
 use tracing::{debug, warn};
 
+/// Maximum age for an offer/answer payload before we consider it stale.
+const SIGNAL_MAX_AGE: Duration = Duration::from_secs(60);
+
 /// Configuration for the orchestration layer.
 #[derive(Debug, Clone)]
 pub struct HolePunchConfig {
@@ -199,18 +202,28 @@ async fn initiate_single_attempt_from_advertisement(
             loop {
                 let answer_event = wait_for_first_signal(&mut subscriptions, Some(config.signal_timeout)).await?;
 
-                let (sender_pubkey, answer) = match parse_answer_event(&reply_keys, &answer_event) {
-                    Ok(result) => result,
-                    Err(_) => {
-                        debug!(event_id = %answer_event.id, "ignoring non-answer signal while awaiting answer");
-                        continue;
-                    }
-                };
-                if sender_pubkey != advertisement.peer_pubkey {
-                    debug!(
-                        event_id = %answer_event.id,
-                        author = %sender_pubkey,
-                        expected = %advertisement.peer_pubkey,
+            let (sender_pubkey, answer) = match parse_answer_event(&reply_keys, &answer_event) {
+                Ok(result) => result,
+                Err(_) => {
+                    debug!(event_id = %answer_event.id, "ignoring non-answer signal while awaiting answer");
+                    continue;
+                }
+            };
+            if !is_fresh_signal_timestamp(answer.timestamp, SIGNAL_MAX_AGE) {
+                debug!(
+                    event_id = %answer_event.id,
+                    session_id = %answer.session_id,
+                    timestamp = answer.timestamp,
+                    max_age_secs = SIGNAL_MAX_AGE.as_secs(),
+                    "ignoring stale answer"
+                );
+                continue;
+            }
+            if sender_pubkey != advertisement.peer_pubkey {
+                debug!(
+                    event_id = %answer_event.id,
+                    author = %sender_pubkey,
+                    expected = %advertisement.peer_pubkey,
                         "ignoring answer from unexpected peer"
                     );
                     continue;
@@ -319,7 +332,19 @@ pub async fn wait_for_first_offer(
     loop {
         let event = wait_for_first_signal(subscriptions, timeout_duration).await?;
         match parse_offer_event(keys, &event) {
-            Ok(offer) => return Ok(offer),
+            Ok(offer) => {
+                if !is_fresh_signal_timestamp(offer.offer.timestamp, SIGNAL_MAX_AGE) {
+                    debug!(
+                        event_id = %event.id,
+                        session_id = %offer.offer.session_id,
+                        timestamp = offer.offer.timestamp,
+                        max_age_secs = SIGNAL_MAX_AGE.as_secs(),
+                        "ignoring stale offer"
+                    );
+                    continue;
+                }
+                return Ok(offer);
+            }
             Err(_) => {
                 debug!(event_id = %event.id, "ignoring non-offer signal while awaiting offer");
             }
@@ -378,4 +403,9 @@ async fn cleanup_signaling_events(relays: &[&RelayClient], keys: &Keys, event_id
             );
         }
     }
+}
+
+fn is_fresh_signal_timestamp(timestamp_secs: u64, max_age: Duration) -> bool {
+    let now = Timestamp::now().as_secs();
+    now.saturating_sub(timestamp_secs) <= max_age.as_secs()
 }
