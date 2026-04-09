@@ -8,7 +8,8 @@ use super::HolePunchError;
 use super::punch::{DEFAULT_PROBE_INTERVAL, DEFAULT_PUNCH_TIMEOUT, run_punch};
 use super::signaling::{
     Answer, IncomingOffer, Offer, ServiceAdvertisement, parse_answer_event, parse_offer_event,
-    send_answer_all, send_offer_all, subscribe_signals,
+    publish_deletion_event, send_answer_all, send_offer_all, subscribe_signals,
+    SIGNAL_CLEANUP_REASON,
 };
 use crate::nostr_relay::{RelayClient, Subscription};
 use crate::stun::stun_query_any;
@@ -145,6 +146,7 @@ pub async fn initiate_from_advertisement(
     .await?;
 
     let mut subscriptions = subscribe_signals_all(relays, keys.public_key()).await?;
+    let mut published_offer_ids = Vec::with_capacity(1);
 
     let result = async {
         let session_id = hex::encode(rand::random::<[u8; 16]>());
@@ -156,7 +158,8 @@ pub async fn initiate_from_advertisement(
             timestamp: Timestamp::now().as_secs(),
         };
 
-        send_offer_all(relays, keys, &advertisement.peer_pubkey, &offer).await?;
+        let offer_event = send_offer_all(relays, keys, &advertisement.peer_pubkey, &offer).await?;
+        published_offer_ids.push(offer_event.id);
 
         loop {
             let answer_event = wait_for_first_signal(&mut subscriptions, Some(config.signal_timeout)).await?;
@@ -210,6 +213,7 @@ pub async fn initiate_from_advertisement(
     .await;
 
     close_subscriptions(subscriptions).await;
+    cleanup_signaling_events(relays, keys, &published_offer_ids).await;
     result
 }
 
@@ -236,26 +240,33 @@ pub async fn accept_offer(
         timestamp: Timestamp::now().as_secs(),
     };
 
-    send_answer_all(relays, keys, &incoming_offer.sender_pubkey, &answer).await?;
+    let answer_event = send_answer_all(relays, keys, &incoming_offer.sender_pubkey, &answer).await?;
+    let published_answer_ids = [answer_event.id];
 
     let peer_addr = offer.reflexive_addr;
 
-    run_punch(
-        socket,
-        peer_addr,
-        &offer.session_id,
-        config.probe_interval,
-        config.punch_timeout,
-    )
-    .await?;
+    let result = async {
+        run_punch(
+            socket,
+            peer_addr,
+            &offer.session_id,
+            config.probe_interval,
+            config.punch_timeout,
+        )
+        .await?;
 
-    Ok(PunchedPath {
-        peer_pubkey: incoming_offer.sender_pubkey,
-        peer_addr,
-        session_id: offer.session_id.clone(),
-        local_reflexive_addr,
-        used_stun_server: used_stun_server.clone(),
-    })
+        Ok(PunchedPath {
+            peer_pubkey: incoming_offer.sender_pubkey,
+            peer_addr,
+            session_id: offer.session_id.clone(),
+            local_reflexive_addr,
+            used_stun_server: used_stun_server.clone(),
+        })
+    }
+    .await;
+
+    cleanup_signaling_events(relays, keys, &published_answer_ids).await;
+    result
 }
 
 /// Wait for the first incoming offer across multiple relay subscriptions.
@@ -304,5 +315,28 @@ fn prefer_stun_server(primary: &str, fallbacks: &[String]) -> Vec<String> {
 async fn close_subscriptions(subscriptions: Vec<Subscription>) {
     for sub in subscriptions {
         let _ = sub.close().await;
+    }
+}
+
+async fn cleanup_signaling_events(relays: &[&RelayClient], keys: &Keys, event_ids: &[EventId]) {
+    if event_ids.is_empty() {
+        return;
+    }
+
+    match publish_deletion_event(relays, keys, event_ids, SIGNAL_CLEANUP_REASON).await {
+        Ok(event) => {
+            debug!(
+                event_id = %event.id,
+                targets = event_ids.len(),
+                "published signaling cleanup deletion request"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                targets = event_ids.len(),
+                "failed to publish signaling cleanup deletion request"
+            );
+        }
     }
 }

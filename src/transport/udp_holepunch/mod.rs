@@ -463,6 +463,7 @@ impl UdpHolePunchTransport {
             stun_attempt_timeout: Duration::from_secs(2),
             probe_interval: Duration::from_millis(self.config.probe_ms()),
             punch_timeout: Duration::from_secs(self.config.timeout_secs()),
+            ..HolePunchConfig::default()
         }
     }
 

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::{Duration, timeout};
 use tracing::{debug, trace, warn};
 
 /// A connection to a single Nostr relay.
@@ -126,6 +127,23 @@ impl RelayClient {
 
     /// Publish a signed event to the relay. Waits for the OK response.
     pub async fn publish(&self, event: Event) -> Result<(), NostrError> {
+        self.publish_inner(event, None).await
+    }
+
+    /// Publish a signed event to the relay, but stop waiting after `timeout_duration`.
+    pub async fn publish_with_timeout(
+        &self,
+        event: Event,
+        timeout_duration: Duration,
+    ) -> Result<(), NostrError> {
+        self.publish_inner(event, Some(timeout_duration)).await
+    }
+
+    async fn publish_inner(
+        &self,
+        event: Event,
+        timeout_duration: Option<Duration>,
+    ) -> Result<(), NostrError> {
         let event_id = event.id;
         trace!(relay = %self.url, event_id = %event_id, "publishing event");
 
@@ -138,15 +156,27 @@ impl RelayClient {
 
         // Send the EVENT message.
         let msg = ClientMessage::event(event);
-        self.write_tx
-            .send(msg.as_json())
-            .await
-            .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?;
+        if self.write_tx.send(msg.as_json()).await.is_err() {
+            self.pending_oks.lock().await.remove(&event_id);
+            return Err(NostrError::ConnectionClosedAt(self.url.clone()));
+        }
 
         // Wait for the OK response.
-        let (accepted, message) = ok_rx
-            .await
-            .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?;
+        let (accepted, message) = match timeout_duration {
+            Some(duration) => match timeout(duration, ok_rx).await {
+                Ok(result) => result.map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?,
+                Err(_) => {
+                    self.pending_oks.lock().await.remove(&event_id);
+                    return Err(NostrError::PublishTimeout {
+                        relay: self.url.clone(),
+                        timeout: duration,
+                    });
+                }
+            },
+            None => ok_rx
+                .await
+                .map_err(|_| NostrError::ConnectionClosedAt(self.url.clone()))?,
+        };
 
         if accepted {
             debug!(relay = %self.url, event_id = %event_id, "relay accepted event");

@@ -320,6 +320,7 @@ fn hole_punch_config(args: &Args) -> HolePunchConfig {
         stun_attempt_timeout: Duration::from_secs(2),
         probe_interval: Duration::from_millis(args.probe_ms),
         punch_timeout: Duration::from_secs(args.timeout_secs),
+        ..HolePunchConfig::default()
     }
 }
 

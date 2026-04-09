@@ -3,6 +3,8 @@
 //! Provides a minimal async client for communicating with Nostr relays
 //! over WebSocket, and an in-process test relay for integration testing.
 
+use std::time::Duration;
+
 pub mod relay_client;
 
 #[cfg(test)]
@@ -24,6 +26,9 @@ pub enum NostrError {
 
     #[error("relay {0} connection closed")]
     ConnectionClosedAt(String),
+
+    #[error("relay {relay} timed out waiting for OK after {timeout:?}")]
+    PublishTimeout { relay: String, timeout: Duration },
 
     #[error("timeout waiting for EOSE")]
     EoseTimeout,

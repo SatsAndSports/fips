@@ -26,9 +26,12 @@ use super::HolePunchError;
 use crate::nostr_relay::NostrError;
 use crate::nostr_relay::RelayClient;
 use crate::nostr_relay::Subscription;
+use futures::future::join_all;
+use nostr::nips::nip09::EventDeletionRequest;
 use nostr::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 /// The `d` tag value for FIPS service advertisements.
@@ -39,6 +42,12 @@ const SERVICE_AD_KIND: u16 = 30078;
 
 /// Kind for signaling messages (ephemeral).
 const SIGNAL_KIND: u16 = 21059;
+
+/// Per-relay deadline for waiting on an EVENT `OK` response.
+const RELAY_PUBLISH_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Default reason for deleting completed or abandoned signaling events.
+pub const SIGNAL_CLEANUP_REASON: &str = "session concluded";
 
 /// The signaling payload exchanged between initiator and responder.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -260,7 +269,9 @@ pub async fn send_offer(
         offer.session_id, event.id
     );
 
-    client.publish(event.clone()).await?;
+    client
+        .publish_with_timeout(event.clone(), RELAY_PUBLISH_TIMEOUT)
+        .await?;
     Ok(event)
 }
 
@@ -298,7 +309,9 @@ pub async fn send_answer(
         answer.session_id, event.id
     );
 
-    client.publish(event.clone()).await?;
+    client
+        .publish_with_timeout(event.clone(), RELAY_PUBLISH_TIMEOUT)
+        .await?;
     Ok(event)
 }
 
@@ -321,6 +334,37 @@ pub async fn send_answer_all(
     publish_event_all(relays, event, "answer").await
 }
 
+/// Publish a kind 5 deletion request for previously published signaling events.
+pub async fn publish_deletion_event(
+    relays: &[&RelayClient],
+    keys: &Keys,
+    event_ids: &[EventId],
+    reason: &str,
+) -> Result<Event, NostrError> {
+    if event_ids.is_empty() {
+        return Err(NostrError::InvalidEvent(
+            "deletion request requires at least one event id".into(),
+        ));
+    }
+
+    let mut request = EventDeletionRequest::new().ids(event_ids.iter().copied());
+    if !reason.is_empty() {
+        request = request.reason(reason);
+    }
+
+    let event = EventBuilder::delete(request)
+        .sign_with_keys(keys)
+        .map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
+
+    debug!(
+        event_id = %event.id,
+        targets = event_ids.len(),
+        "publishing deletion request"
+    );
+
+    publish_event_all(relays, event, "deletion request").await
+}
+
 async fn publish_event_all(
     relays: &[&RelayClient],
     event: Event,
@@ -332,23 +376,35 @@ async fn publish_event_all(
         )));
     }
 
+    let results = join_all(relays.iter().map(|relay| {
+        let relay_url = relay.url().to_string();
+        let event = event.clone();
+        async move {
+            match relay.publish_with_timeout(event, RELAY_PUBLISH_TIMEOUT).await {
+                Ok(()) => Ok(relay_url),
+                Err(err) => Err((relay_url, err)),
+            }
+        }
+    }))
+    .await;
+
     let mut accepted = 0usize;
     let mut failures = Vec::new();
 
-    for relay in relays {
-        match relay.publish(event.clone()).await {
-            Ok(()) => {
+    for result in results {
+        match result {
+            Ok(_relay_url) => {
                 accepted += 1;
             }
-            Err(err) => {
+            Err((relay_url, err)) => {
                 warn!(
-                    relay = %relay.url(),
+                    relay = %relay_url,
                     event_id = %event.id,
                     event_type,
                     error = %err,
                     "relay publish failed"
                 );
-                failures.push(format!("{}: {}", relay.url(), err));
+                failures.push(format!("{relay_url}: {err}"));
             }
         }
     }
@@ -747,6 +803,51 @@ mod tests {
         rejecting_client.disconnect().await;
         accepting.shutdown().await;
         rejecting.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn publish_deletion_event_creates_kind5_request() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let client = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+        let referenced_a =
+            EventId::parse("00000000000000000000000000000000000000000000000000000000000000aa")
+                .unwrap();
+        let referenced_b =
+            EventId::parse("00000000000000000000000000000000000000000000000000000000000000bb")
+                .unwrap();
+
+        let event = publish_deletion_event(
+            &[&client],
+            &keys,
+            &[referenced_a, referenced_b],
+            SIGNAL_CLEANUP_REASON,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(event.kind, Kind::EventDeletion);
+        assert_eq!(event.pubkey, keys.public_key());
+        assert_eq!(event.content, SIGNAL_CLEANUP_REASON);
+        assert_eq!(event.tags.iter().filter(|tag| tag.kind() == TagKind::e()).count(), 2);
+
+        let filter = Filter::new()
+            .kind(Kind::EventDeletion)
+            .author(keys.public_key());
+        let mut sub = client.subscribe(vec![filter]).await.unwrap();
+        sub.wait_for_eose().await.unwrap();
+
+        let stored = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("timed out waiting for stored deletion event")
+            .expect("subscription closed");
+        assert_eq!(stored.id, event.id);
+
+        sub.close().await.unwrap();
+        client.disconnect().await;
+        relay.shutdown().await;
     }
 
     #[tokio::test]
