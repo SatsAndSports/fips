@@ -55,26 +55,53 @@ enum DiscoverySessionOutcome {
 #[derive(Debug, Default, Serialize)]
 pub struct UdpHolePunchStatsSnapshot {
     pub relays_connected: u64,
+    pub discovery_reconnects: u64,
+    pub discovery_session_failures: u64,
     pub advertisements_seen: u64,
     pub advertisements_deduped: u64,
     pub advertisements_updated: u64,
+    pub advertisements_ignored_expired: u64,
+    pub advertisements_ignored_newer_deletion: u64,
+    pub advertisement_deletions_seen: u64,
+    pub advertisement_deletions_ignored_foreign: u64,
+    pub advertisements_evicted_by_deletion: u64,
 }
 
 #[derive(Debug, Default)]
 struct UdpHolePunchStats {
     relays_connected: AtomicU64,
+    discovery_reconnects: AtomicU64,
+    discovery_session_failures: AtomicU64,
     advertisements_seen: AtomicU64,
     advertisements_deduped: AtomicU64,
     advertisements_updated: AtomicU64,
+    advertisements_ignored_expired: AtomicU64,
+    advertisements_ignored_newer_deletion: AtomicU64,
+    advertisement_deletions_seen: AtomicU64,
+    advertisement_deletions_ignored_foreign: AtomicU64,
+    advertisements_evicted_by_deletion: AtomicU64,
 }
 
 impl UdpHolePunchStats {
     fn snapshot(&self) -> UdpHolePunchStatsSnapshot {
         UdpHolePunchStatsSnapshot {
             relays_connected: self.relays_connected.load(Ordering::Relaxed),
+            discovery_reconnects: self.discovery_reconnects.load(Ordering::Relaxed),
+            discovery_session_failures: self.discovery_session_failures.load(Ordering::Relaxed),
             advertisements_seen: self.advertisements_seen.load(Ordering::Relaxed),
             advertisements_deduped: self.advertisements_deduped.load(Ordering::Relaxed),
             advertisements_updated: self.advertisements_updated.load(Ordering::Relaxed),
+            advertisements_ignored_expired: self.advertisements_ignored_expired.load(Ordering::Relaxed),
+            advertisements_ignored_newer_deletion: self
+                .advertisements_ignored_newer_deletion
+                .load(Ordering::Relaxed),
+            advertisement_deletions_seen: self.advertisement_deletions_seen.load(Ordering::Relaxed),
+            advertisement_deletions_ignored_foreign: self
+                .advertisement_deletions_ignored_foreign
+                .load(Ordering::Relaxed),
+            advertisements_evicted_by_deletion: self
+                .advertisements_evicted_by_deletion
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -139,6 +166,9 @@ impl SharedState {
             .get(&pubkey)
             .is_some_and(|deletion| !event_is_newer_than_event(&advertisement, deletion));
         if deletion_is_newer {
+            stats
+                .advertisements_ignored_newer_deletion
+                .fetch_add(1, Ordering::Relaxed);
             debug!(
                 peer_pubkey = %pubkey,
                 event_id = %advertisement.event_id,
@@ -152,6 +182,9 @@ impl SharedState {
             .get(&pubkey)
             .is_some_and(|deletion| !event_is_newer_than_event(&advertisement, deletion))
         {
+            stats
+                .advertisements_ignored_newer_deletion
+                .fetch_add(1, Ordering::Relaxed);
             debug!(
                 peer_pubkey = %pubkey,
                 event_id = %advertisement.event_id,
@@ -197,7 +230,10 @@ impl SharedState {
         }
     }
 
-    fn record_advertisement_deletion(&self, event: Event) {
+    fn record_advertisement_deletion(&self, event: Event, stats: &UdpHolePunchStats) {
+        stats
+            .advertisement_deletions_seen
+            .fetch_add(1, Ordering::Relaxed);
         let event_id = event.id.to_hex();
         {
             let mut seen = self.seen_event_ids.lock().unwrap();
@@ -218,6 +254,14 @@ impl SharedState {
             .cloned()
             .collect();
         if coordinates.is_empty() {
+            stats
+                .advertisement_deletions_ignored_foreign
+                .fetch_add(1, Ordering::Relaxed);
+            debug!(
+                deleter = %event.pubkey,
+                event_id = %event.id,
+                "ignoring advertisement deletion without matching ownership"
+            );
             return;
         }
 
@@ -246,6 +290,9 @@ impl SharedState {
             drop(latest_deletions);
 
             if let Some(cached) = evicted {
+                stats
+                    .advertisements_evicted_by_deletion
+                    .fetch_add(1, Ordering::Relaxed);
                 debug!(
                     peer_pubkey = %pubkey,
                     event_id = %event.id,
@@ -489,8 +536,20 @@ impl UdpHolePunchTransport {
         let addr = addr.clone();
         let bind_ip = self.config.bind_ip().to_string();
         let relay_urls = relay_urls_for_outbound(&self.config.relays, &advertisement.relays);
+        let relay_source = relay_source_for_outbound(&self.config.relays, &advertisement.relays);
         let hp_config = self.hole_punch_config();
         let packet_tx = self.packet_tx.clone();
+
+        debug!(
+            transport_id = %transport_id,
+            peer = %advertisement.peer_pubkey,
+            handle = %addr,
+            relay_source,
+            relay_count = relay_urls.len(),
+            advertised_relay_count = advertisement.relays.len(),
+            advertised_stun_count = advertisement.stun_servers.len(),
+            "starting udp_holepunch outbound punch"
+        );
 
         tokio::spawn(async move {
             let result =
@@ -525,6 +584,7 @@ impl UdpHolePunchTransport {
                         peer = %punched_path.peer_pubkey,
                         remote = %punched_path.peer_addr,
                         session = %punched_path.session_id,
+                        stun_server = %punched_path.used_stun_server,
                         "udp_holepunch outbound connection established"
                     );
                 }
@@ -684,6 +744,7 @@ async fn run_discovery_worker(
         .await
         {
             DiscoverySessionOutcome::ConnectedThenClosed => {
+                stats.discovery_reconnects.fetch_add(1, Ordering::Relaxed);
                 reconnect_delay = next_discovery_reconnect_delay(reconnect_delay, true);
                 warn!(
                     transport_id = %transport_id,
@@ -694,6 +755,9 @@ async fn run_discovery_worker(
                 tokio::time::sleep(reconnect_delay).await;
             }
             DiscoverySessionOutcome::Failed(err) => {
+                stats
+                    .discovery_session_failures
+                    .fetch_add(1, Ordering::Relaxed);
                 warn!(
                     transport_id = %transport_id,
                     relay = %relay_url,
@@ -755,6 +819,9 @@ async fn run_discovery_session(
         match event.kind.as_u16() {
             TRANSPORT_SERVICE_AD_KIND => {
                 if event.is_expired() {
+                    stats
+                        .advertisements_ignored_expired
+                        .fetch_add(1, Ordering::Relaxed);
                     debug!(
                         transport_id = %transport_id,
                         relay = %relay_url,
@@ -774,7 +841,7 @@ async fn run_discovery_session(
                 }
             }
             value if value == Kind::EventDeletion.as_u16() => {
-                shared.record_advertisement_deletion(event);
+                shared.record_advertisement_deletion(event, &stats);
             }
             _ => {
                 debug!(transport_id = %transport_id, relay = %relay_url, event_id = %event.id, "ignoring unrelated event in udp_holepunch discovery worker");
@@ -834,6 +901,16 @@ fn relay_urls_for_outbound(config_relays: &[String], ad_relays: &[String]) -> Ve
     }
 }
 
+fn relay_source_for_outbound(config_relays: &[String], ad_relays: &[String]) -> &'static str {
+    if !ad_relays.is_empty() {
+        "advertisement"
+    } else if !config_relays.is_empty() {
+        "config"
+    } else {
+        "none"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Outbound punch (runs in a background task spawned by connect_async)
 // ---------------------------------------------------------------------------
@@ -849,6 +926,14 @@ async fn run_outbound_punch(
     let socket = UdpSocket::bind(&bind_addr)
         .await
         .map_err(|e| format!("socket bind {bind_addr}: {e}"))?;
+
+    debug!(
+        bind_addr,
+        relay_count = relay_urls.len(),
+        stun_count = advertisement.stun_servers.len(),
+        peer = %advertisement.peer_pubkey,
+        "udp_holepunch outbound punch socket ready"
+    );
 
     let mut relays = Vec::new();
     for url in relay_urls {
@@ -1311,6 +1396,7 @@ mod tests {
 
         let discovered = transport.discover().unwrap();
         assert!(discovered.is_empty(), "expired advertisement should be ignored");
+        assert_eq!(transport.stats().advertisements_ignored_expired, 1);
 
         publisher.disconnect().await;
         relay.shutdown().await;
@@ -1388,6 +1474,7 @@ mod tests {
         })
         .await
         .expect("timed out waiting for relay reconnect");
+        assert!(transport.stats().discovery_reconnects >= 1);
 
         let rediscovered_handle = timeout(Duration::from_secs(5), async {
             loop {
@@ -1450,6 +1537,8 @@ mod tests {
         assert!(transport.discover().unwrap().is_empty());
         assert!(transport.shared.latest_by_pubkey.lock().unwrap().is_empty());
         assert!(transport.shared.handles.lock().unwrap().is_empty());
+        assert_eq!(transport.stats().advertisement_deletions_seen, 1);
+        assert_eq!(transport.stats().advertisements_evicted_by_deletion, 1);
 
         publisher.disconnect().await;
         relay.shutdown().await;
@@ -1509,6 +1598,8 @@ mod tests {
 
         assert!(transport.discover().unwrap().is_empty());
         assert!(transport.shared.latest_by_pubkey.lock().unwrap().is_empty());
+        assert_eq!(transport.stats().advertisement_deletions_seen, 1);
+        assert_eq!(transport.stats().advertisements_evicted_by_deletion, 1);
 
         publisher.disconnect().await;
         relay.shutdown().await;
@@ -1568,6 +1659,49 @@ mod tests {
             .cloned()
             .expect("advertisement should not be evicted by foreign deletion");
         assert_eq!(cached.event_id, initial_event.id);
+        assert_eq!(transport.stats().advertisement_deletions_seen, 1);
+        assert_eq!(transport.stats().advertisement_deletions_ignored_foreign, 1);
+        assert_eq!(transport.stats().advertisements_evicted_by_deletion, 0);
+
+        publisher.disconnect().await;
+        relay.shutdown().await;
+        transport.stop_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn discover_ignores_stale_advertisement_after_newer_deletion() {
+        init_test_logging();
+
+        let relay = TestRelay::start().await;
+        let publisher = RelayClient::connect(relay.url()).await.unwrap();
+        let keys = Keys::generate();
+        let now = Timestamp::now();
+
+        let config = UdpHolePunchConfig {
+            relays: vec![relay.url().to_string()],
+            stun_servers: vec!["stun.example.com:3478".to_string()],
+            auto_connect: Some(true),
+            ..Default::default()
+        };
+
+        let (packet_tx, _packet_rx) = crate::transport::packet_channel(8);
+        let mut transport = UdpHolePunchTransport::new(TransportId::new(49), None, config, packet_tx);
+        transport.start_async().await.unwrap();
+
+        publish_test_service_advertisement_deletion(
+            &publisher,
+            &keys,
+            Timestamp::from(now.as_secs().saturating_add(1)),
+        )
+        .await;
+        publish_test_service_advertisement(&publisher, &keys, now, None).await;
+
+        sleep(Duration::from_millis(200)).await;
+
+        assert!(transport.discover().unwrap().is_empty());
+        assert!(transport.shared.latest_by_pubkey.lock().unwrap().is_empty());
+        assert_eq!(transport.stats().advertisement_deletions_seen, 1);
+        assert_eq!(transport.stats().advertisements_ignored_newer_deletion, 1);
 
         publisher.disconnect().await;
         relay.shutdown().await;

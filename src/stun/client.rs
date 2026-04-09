@@ -8,6 +8,7 @@ use super::wire::{build_binding_request, parse_binding_response};
 use std::net::{SocketAddr, SocketAddrV4};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, timeout};
+use tracing::debug;
 
 /// Default timeout for a STUN Binding Request/Response exchange.
 const STUN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,9 +23,16 @@ pub async fn stun_query_any(
     let mut last_err = None;
 
     for stun_server in stun_servers {
+        debug!(stun_server, timeout = ?timeout_duration, "trying STUN server");
         match stun_query_with_timeout(socket, stun_server, timeout_duration).await {
-            Ok(addr) => return Ok((addr, stun_server.clone())),
-            Err(err) => last_err = Some(err),
+            Ok(addr) => {
+                debug!(stun_server, mapped_addr = %addr, "STUN server succeeded");
+                return Ok((addr, stun_server.clone()));
+            }
+            Err(err) => {
+                debug!(stun_server, error = %err, "STUN server failed");
+                last_err = Some(err);
+            }
         }
     }
 
