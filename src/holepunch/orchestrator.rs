@@ -160,23 +160,23 @@ pub async fn initiate_from_advertisement(
 
         loop {
             let answer_event = wait_for_first_signal(&mut subscriptions, Some(config.signal_timeout)).await?;
-            if answer_event.pubkey != advertisement.peer_pubkey {
-                debug!(
-                    event_id = %answer_event.id,
-                    author = %answer_event.pubkey,
-                    expected = %advertisement.peer_pubkey,
-                    "ignoring signal from unexpected peer"
-                );
-                continue;
-            }
 
-            let answer = match parse_answer_event(&answer_event) {
-                Ok(answer) => answer,
+            let (sender_pubkey, answer) = match parse_answer_event(keys, &answer_event) {
+                Ok(result) => result,
                 Err(_) => {
                     debug!(event_id = %answer_event.id, "ignoring non-answer signal while awaiting answer");
                     continue;
                 }
             };
+            if sender_pubkey != advertisement.peer_pubkey {
+                debug!(
+                    event_id = %answer_event.id,
+                    author = %sender_pubkey,
+                    expected = %advertisement.peer_pubkey,
+                    "ignoring answer from unexpected peer"
+                );
+                continue;
+            }
             if answer.session_id != session_id {
                 debug!(
                     event_id = %answer_event.id,
@@ -259,13 +259,16 @@ pub async fn accept_offer(
 }
 
 /// Wait for the first incoming offer across multiple relay subscriptions.
+///
+/// `keys` are needed to unwrap the NIP-59 gift-wrapped offer.
 pub async fn wait_for_first_offer(
     subscriptions: &mut [Subscription],
+    keys: &Keys,
     timeout_duration: Option<Duration>,
 ) -> Result<IncomingOffer, HolePunchError> {
     loop {
         let event = wait_for_first_signal(subscriptions, timeout_duration).await?;
-        match parse_offer_event(&event) {
+        match parse_offer_event(keys, &event) {
             Ok(offer) => return Ok(offer),
             Err(_) => {
                 debug!(event_id = %event.id, "ignoring non-offer signal while awaiting offer");

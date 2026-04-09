@@ -61,7 +61,7 @@ async fn full_holepunch_localhost() {
 
     let responder_stun_fallback = vec![stun_addr.clone()];
     let responder_flow = async {
-        let incoming_offer = wait_for_first_offer(&mut responder_subs, None)
+        let incoming_offer = wait_for_first_offer(&mut responder_subs, &responder_keys, None)
             .await
             .unwrap();
         accept_offer(

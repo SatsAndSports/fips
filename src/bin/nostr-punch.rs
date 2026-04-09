@@ -257,7 +257,7 @@ async fn handle_responder_session(
     fallback_stun_servers: &[String],
     config: &HolePunchConfig,
 ) -> Result<(), String> {
-    let incoming_offer = wait_for_first_offer(subs, None)
+    let incoming_offer = wait_for_first_offer(subs, keys, None)
         .await
         .map_err(|e| e.to_string())?;
     let path = accept_offer(socket, relays, keys, &incoming_offer, fallback_stun_servers, config)

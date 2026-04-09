@@ -788,7 +788,7 @@ async fn run_responder_worker(
 
     // Accept loop -- handle offers one at a time.
     loop {
-        let offer = match wait_for_first_offer(&mut subscriptions, None).await {
+        let offer = match wait_for_first_offer(&mut subscriptions, &keys, None).await {
             Ok(offer) => offer,
             Err(err) => {
                 warn!(transport_id = %transport_id, error = %err, "udp_holepunch responder: offer wait failed; exiting");

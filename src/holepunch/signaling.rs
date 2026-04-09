@@ -10,8 +10,17 @@
 //!    kind 21059 answer.
 //! 4. Both peers begin hole punching.
 //!
-//! Currently uses plaintext signaling events. NIP-44 encryption and
-//! NIP-59 gift wrapping will be added later.
+//! Signaling events (offers and answers) are NIP-44 encrypted and NIP-59
+//! gift-wrapped using kind 21059 (ephemeral range). The three-layer
+//! structure is:
+//!
+//! - **Rumor** (unsigned, kind 21059): contains the JSON payload and a
+//!   `p` tag for the recipient.
+//! - **Seal** (kind 13, signed by sender's real keys): NIP-44 encrypts
+//!   the rumor JSON to the recipient's pubkey.
+//! - **Outer wrap** (kind 21059, signed by an ephemeral key): NIP-44
+//!   encrypts the seal JSON to the recipient's pubkey. Carries the `p`
+//!   tag for relay filtering and an `expiration` tag (120 s).
 
 use super::HolePunchError;
 use crate::nostr_relay::NostrError;
@@ -362,21 +371,33 @@ async fn publish_event_all(
     }
 }
 
-/// Parse a typed inbound offer from an incoming event.
-pub fn parse_offer_event(event: &Event) -> Result<IncomingOffer, NostrError> {
-    let payload = parse_signal_payload(event)?;
+/// Parse a typed inbound offer from a gift-wrapped event.
+///
+/// Unwraps the NIP-59 gift wrap, verifies the seal, and extracts the
+/// offer payload. The sender's real public key comes from the seal,
+/// not the outer event (which uses an ephemeral key).
+pub fn parse_offer_event(keys: &Keys, event: &Event) -> Result<IncomingOffer, NostrError> {
+    let (sender_pubkey, payload) = unwrap_signal_event(keys, event)?;
     let offer = payload_to_offer(payload)?;
     Ok(IncomingOffer {
-        sender_pubkey: event.pubkey,
+        sender_pubkey,
         event_id: event.id,
         offer,
     })
 }
 
-/// Parse a typed answer from an incoming event.
-pub fn parse_answer_event(event: &Event) -> Result<Answer, NostrError> {
-    let payload = parse_signal_payload(event)?;
-    payload_to_answer(payload)
+/// Parse a typed answer from a gift-wrapped event.
+///
+/// Unwraps the NIP-59 gift wrap, verifies the seal, and extracts the
+/// answer payload. Returns both the sender's real public key and the
+/// answer so the caller can verify the sender identity.
+pub fn parse_answer_event(
+    keys: &Keys,
+    event: &Event,
+) -> Result<(PublicKey, Answer), NostrError> {
+    let (sender_pubkey, payload) = unwrap_signal_event(keys, event)?;
+    let answer = payload_to_answer(payload)?;
+    Ok((sender_pubkey, answer))
 }
 
 /// Parse a typed responder advertisement from a raw Nostr event.
@@ -455,7 +476,7 @@ fn build_offer_event(
     recipient_pubkey: &PublicKey,
     offer: &Offer,
 ) -> Result<Event, NostrError> {
-    build_signal_event(keys, recipient_pubkey, &offer_to_payload(offer))
+    build_gift_wrapped_signal(keys, recipient_pubkey, &offer_to_payload(offer))
 }
 
 fn build_answer_event(
@@ -463,10 +484,17 @@ fn build_answer_event(
     recipient_pubkey: &PublicKey,
     answer: &Answer,
 ) -> Result<Event, NostrError> {
-    build_signal_event(keys, recipient_pubkey, &answer_to_payload(answer))
+    build_gift_wrapped_signal(keys, recipient_pubkey, &answer_to_payload(answer))
 }
 
-fn build_signal_event(
+/// Build a NIP-59 gift-wrapped signaling event (kind 21059).
+///
+/// Three layers:
+/// 1. Rumor (unsigned, kind 21059) — the JSON payload.
+/// 2. Seal (kind 13, signed by `keys`) — NIP-44 encrypts the rumor.
+/// 3. Outer wrap (kind 21059, signed by ephemeral key) — NIP-44 encrypts
+///    the seal. Carries `p` tag + `expiration` tag (120 s).
+fn build_gift_wrapped_signal(
     keys: &Keys,
     recipient_pubkey: &PublicKey,
     payload: &SignalingPayload,
@@ -474,15 +502,89 @@ fn build_signal_event(
     let content =
         serde_json::to_string(payload).map_err(|e| NostrError::InvalidEvent(e.to_string()))?;
 
-    EventBuilder::new(Kind::Custom(SIGNAL_KIND), &content)
+    // Layer 1: Rumor (unsigned event with the plaintext payload).
+    let mut rumor = EventBuilder::new(Kind::Custom(SIGNAL_KIND), &content)
         .tag(Tag::public_key(*recipient_pubkey))
+        .build(keys.public_key());
+    rumor.ensure_id();
+
+    // Layer 2: Seal (encrypt rumor to recipient, sign with our real keys).
+    let encrypted_rumor = nip44::encrypt(
+        keys.secret_key(),
+        recipient_pubkey,
+        rumor.as_json(),
+        nip44::Version::default(),
+    )
+    .map_err(|e| NostrError::InvalidEvent(format!("NIP-44 seal encrypt: {e}")))?;
+
+    let seal = EventBuilder::new(Kind::Seal, encrypted_rumor)
+        .custom_created_at(Timestamp::tweaked(nip59::RANGE_RANDOM_TIMESTAMP_TWEAK))
         .sign_with_keys(keys)
-        .map_err(|e| NostrError::InvalidEvent(e.to_string()))
+        .map_err(|e| NostrError::InvalidEvent(format!("seal sign: {e}")))?;
+
+    // Layer 3: Outer gift wrap (encrypt seal to recipient, sign with
+    // ephemeral key). Uses kind 21059 (ephemeral) instead of standard 1059.
+    let ephemeral_keys = Keys::generate();
+    let encrypted_seal = nip44::encrypt(
+        ephemeral_keys.secret_key(),
+        recipient_pubkey,
+        seal.as_json(),
+        nip44::Version::default(),
+    )
+    .map_err(|e| NostrError::InvalidEvent(format!("NIP-44 wrap encrypt: {e}")))?;
+
+    let expiration = Timestamp::from(Timestamp::now().as_secs() + 120);
+
+    EventBuilder::new(Kind::Custom(SIGNAL_KIND), encrypted_seal)
+        .tag(Tag::public_key(*recipient_pubkey))
+        .tag(Tag::expiration(expiration))
+        .custom_created_at(Timestamp::tweaked(nip59::RANGE_RANDOM_TIMESTAMP_TWEAK))
+        .sign_with_keys(&ephemeral_keys)
+        .map_err(|e| NostrError::InvalidEvent(format!("wrap sign: {e}")))
 }
 
-fn parse_signal_payload(event: &Event) -> Result<SignalingPayload, NostrError> {
-    serde_json::from_str(&event.content)
-        .map_err(|e| NostrError::InvalidEvent(format!("invalid signaling payload: {e}")))
+/// Unwrap a NIP-59 gift-wrapped signaling event and extract the payload.
+///
+/// Returns the real sender's public key (from the seal) and the parsed
+/// signaling payload (from the rumor).
+fn unwrap_signal_event(
+    keys: &Keys,
+    event: &Event,
+) -> Result<(PublicKey, SignalingPayload), NostrError> {
+    // Decrypt the seal from the outer gift wrap.
+    let seal_json = nip44::decrypt(keys.secret_key(), &event.pubkey, &event.content)
+        .map_err(|e| NostrError::InvalidEvent(format!("NIP-44 wrap decrypt: {e}")))?;
+
+    let seal = Event::from_json(&seal_json)
+        .map_err(|e| NostrError::InvalidEvent(format!("invalid seal event: {e}")))?;
+    seal.verify()
+        .map_err(|e| NostrError::InvalidEvent(format!("seal signature invalid: {e}")))?;
+
+    if seal.kind != Kind::Seal {
+        return Err(NostrError::InvalidEvent(format!(
+            "expected seal kind 13, got {}",
+            seal.kind.as_u16()
+        )));
+    }
+
+    // Decrypt the rumor from the seal.
+    let rumor_json = nip44::decrypt(keys.secret_key(), &seal.pubkey, &seal.content)
+        .map_err(|e| NostrError::InvalidEvent(format!("NIP-44 rumor decrypt: {e}")))?;
+
+    let rumor = UnsignedEvent::from_json(&rumor_json)
+        .map_err(|e| NostrError::InvalidEvent(format!("invalid rumor event: {e}")))?;
+
+    // Verify sender consistency: rumor author must match seal signer.
+    if rumor.pubkey != seal.pubkey {
+        return Err(NostrError::InvalidEvent(
+            "rumor pubkey does not match seal signer".into(),
+        ));
+    }
+
+    let payload: SignalingPayload = serde_json::from_str(&rumor.content)
+        .map_err(|e| NostrError::InvalidEvent(format!("invalid signaling payload: {e}")))?;
+
+    Ok((seal.pubkey, payload))
 }
 
 fn offer_to_payload(offer: &Offer) -> SignalingPayload {
@@ -701,7 +803,7 @@ mod tests {
             .expect("responder timed out waiting for offer")
             .expect("responder subscription closed");
 
-        let received_offer = parse_offer_event(&offer_event).unwrap();
+        let received_offer = parse_offer_event(&responder_keys, &offer_event).unwrap();
         assert_eq!(received_offer.sender_pubkey, initiator_keys.public_key());
         assert_eq!(received_offer.offer.session_id, session_id);
         assert_eq!(received_offer.offer.reflexive_addr, "1.2.3.4:5678".parse::<SocketAddr>().unwrap());
@@ -728,7 +830,8 @@ mod tests {
             .expect("initiator timed out waiting for answer")
             .expect("initiator subscription closed");
 
-        let received_answer = parse_answer_event(&answer_event).unwrap();
+        let (answer_sender, received_answer) = parse_answer_event(&initiator_keys, &answer_event).unwrap();
+        assert_eq!(answer_sender, responder_keys.public_key());
         assert_eq!(received_answer.session_id, session_id);
         assert_eq!(received_answer.reflexive_addr, "5.6.7.8:9012".parse::<SocketAddr>().unwrap());
 
