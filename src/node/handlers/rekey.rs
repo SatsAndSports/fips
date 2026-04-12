@@ -184,6 +184,9 @@ impl Node {
                 Ok(_) => {
                     debug!(
                         peer = %self.peer_display_name(node_addr),
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        link_id = %link_id,
                         our_index = %our_index,
                         "Rekey initiated, sent msg1 on existing link"
                     );
@@ -191,6 +194,10 @@ impl Node {
                 Err(e) => {
                     warn!(
                         peer = %self.peer_display_name(node_addr),
+                        transport_id = %transport_id,
+                        remote_addr = %remote_addr,
+                        link_id = %link_id,
+                        our_index = %our_index,
                         error = %e,
                         "Failed to send rekey msg1"
                     );
@@ -253,9 +260,18 @@ impl Node {
                 if let Some(peer) = self.peers.get_mut(&node_addr) {
                     peer.set_msg1_next_resend(now_ms + interval_ms);
                 }
-                trace!(
+                debug!(
                     peer = %self.peer_display_name(&node_addr),
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
                     "Resent rekey msg1"
+                );
+            } else {
+                debug!(
+                    peer = %self.peer_display_name(&node_addr),
+                    transport_id = %transport_id,
+                    remote_addr = %remote_addr,
+                    "Failed to resend rekey msg1"
                 );
             }
         }

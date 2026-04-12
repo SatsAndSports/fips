@@ -34,7 +34,10 @@ pub use node::{
     TreeConfig,
 };
 pub use peer::{ConnectPolicy, PeerAddress, PeerConfig};
-pub use transport::{BleConfig, DirectoryServiceConfig, EthernetConfig, TcpConfig, TorConfig, TransportInstances, TransportsConfig, UdpConfig};
+pub use transport::{
+    BleConfig, DirectoryServiceConfig, EthernetConfig, TcpConfig, TorConfig, TransportInstances,
+    TransportsConfig, UdpConfig, UdpHolePunchConfig,
+};
 
 /// Default config filename.
 const CONFIG_FILENAME: &str = "fips.yaml";
@@ -904,12 +907,77 @@ transports:
     }
 
     #[test]
+    fn test_parse_udp_holepunch_single_instance() {
+        let yaml = r#"
+transports:
+  udp_holepunch:
+    bind_ip: "0.0.0.0"
+    relays:
+      - "wss://relay.damus.io"
+    stun_servers:
+      - "stun.l.google.com:19302"
+    auto_connect: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.transports.udp_holepunch.len(), 1);
+        let instances: Vec<_> = config.transports.udp_holepunch.iter().collect();
+        assert_eq!(instances[0].0, None); // Single instance has no name
+        assert_eq!(instances[0].1.bind_ip(), "0.0.0.0");
+        assert_eq!(
+            instances[0].1.relays,
+            vec!["wss://relay.damus.io".to_string()]
+        );
+        assert_eq!(
+            instances[0].1.stun_servers,
+            vec!["stun.l.google.com:19302".to_string()]
+        );
+        assert!(instances[0].1.auto_connect());
+        assert!(!instances[0].1.accept_connections());
+    }
+
+    #[test]
+    fn test_parse_udp_holepunch_named_instances() {
+        let yaml = r#"
+transports:
+  udp_holepunch:
+    responder:
+      accept_connections: true
+      relays:
+        - "wss://relay.damus.io"
+      stun_servers:
+        - "stun.l.google.com:19302"
+    initiator:
+      auto_connect: true
+      relays:
+        - "wss://nos.lol"
+      stun_servers:
+        - "stun.cloudflare.com:3478"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+
+        assert_eq!(config.transports.udp_holepunch.len(), 2);
+
+        let instances: std::collections::HashMap<_, _> =
+            config.transports.udp_holepunch.iter().collect();
+
+        assert!(instances[&Some("responder")].accept_connections());
+        assert!(!instances[&Some("responder")].auto_connect());
+        assert!(instances[&Some("initiator")].auto_connect());
+        assert_eq!(
+            instances[&Some("initiator")].stun_servers,
+            vec!["stun.cloudflare.com:3478".to_string()]
+        );
+    }
+
+    #[test]
     fn test_parse_transport_empty() {
         let yaml = r#"
 transports: {}
 "#;
         let config: Config = serde_yaml::from_str(yaml).unwrap();
         assert!(config.transports.udp.is_empty());
+        assert!(config.transports.udp_holepunch.is_empty());
         assert!(config.transports.is_empty());
     }
 

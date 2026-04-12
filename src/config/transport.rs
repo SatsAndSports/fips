@@ -19,6 +19,18 @@ const DEFAULT_UDP_RECV_BUF: usize = 2 * 1024 * 1024;
 /// Default UDP send buffer size (2 MB).
 const DEFAULT_UDP_SEND_BUF: usize = 2 * 1024 * 1024;
 
+/// Default UDP hole-punch bind IP.
+const DEFAULT_UDP_HOLEPUNCH_BIND_IP: &str = "0.0.0.0";
+
+/// Default hole-punch probe interval in milliseconds.
+const DEFAULT_UDP_HOLEPUNCH_PROBE_MS: u64 = 200;
+
+/// Default hole-punch timeout in seconds.
+const DEFAULT_UDP_HOLEPUNCH_TIMEOUT_SECS: u64 = 10;
+
+/// Default advertisement expiration TTL in seconds (1 hour).
+const DEFAULT_UDP_HOLEPUNCH_AD_EXPIRATION_SECS: u64 = 3600;
+
 /// UDP transport instance configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,6 +71,79 @@ impl UdpConfig {
     /// Get the send buffer size, using default if not configured.
     pub fn send_buf_size(&self) -> usize {
         self.send_buf_size.unwrap_or(DEFAULT_UDP_SEND_BUF)
+    }
+}
+
+/// UDP hole-punch transport instance configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpHolePunchConfig {
+    /// Local IP/interface to bind per-peer UDP sockets on. Defaults to "0.0.0.0".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_ip: Option<String>,
+
+    /// Nostr relays used for advertisement discovery and signaling.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relays: Vec<String>,
+
+    /// STUN servers advertised to peers and used as responder fallbacks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stun_servers: Vec<String>,
+
+    /// Punch probe interval in milliseconds. Default: 200.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_ms: Option<u64>,
+
+    /// Signaling and punch timeout in seconds. Default: 10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+
+    /// Auto-connect to discovered advertisements. Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_connect: Option<bool>,
+
+    /// Accept inbound hole-punch offers. Default: false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_connections: Option<bool>,
+
+    /// Advertisement expiration TTL in seconds. Default: 3600 (1 hour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_expiration_secs: Option<u64>,
+}
+
+impl UdpHolePunchConfig {
+    /// Get the bind IP, using the default if not configured.
+    pub fn bind_ip(&self) -> &str {
+        self.bind_ip
+            .as_deref()
+            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_BIND_IP)
+    }
+
+    /// Get the punch probe interval in milliseconds. Default: 200.
+    pub fn probe_ms(&self) -> u64 {
+        self.probe_ms.unwrap_or(DEFAULT_UDP_HOLEPUNCH_PROBE_MS)
+    }
+
+    /// Get the signaling/punch timeout in seconds. Default: 10.
+    pub fn timeout_secs(&self) -> u64 {
+        self.timeout_secs
+            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_TIMEOUT_SECS)
+    }
+
+    /// Whether to auto-connect to discovered advertisements. Default: false.
+    pub fn auto_connect(&self) -> bool {
+        self.auto_connect.unwrap_or(false)
+    }
+
+    /// Whether to accept inbound hole-punch offers. Default: false.
+    pub fn accept_connections(&self) -> bool {
+        self.accept_connections.unwrap_or(false)
+    }
+
+    /// Get the advertisement expiration TTL in seconds. Default: 3600 (1 hour).
+    pub fn ad_expiration_secs(&self) -> u64 {
+        self.ad_expiration_secs
+            .unwrap_or(DEFAULT_UDP_HOLEPUNCH_AD_EXPIRATION_SECS)
     }
 }
 
@@ -635,6 +720,10 @@ pub struct TransportsConfig {
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub udp: TransportInstances<UdpConfig>,
 
+    /// UDP hole-punch transport instances.
+    #[serde(default, skip_serializing_if = "is_transport_empty")]
+    pub udp_holepunch: TransportInstances<UdpHolePunchConfig>,
+
     /// Ethernet transport instances.
     #[serde(default, skip_serializing_if = "is_transport_empty")]
     pub ethernet: TransportInstances<EthernetConfig>,
@@ -661,6 +750,7 @@ impl TransportsConfig {
     /// Check if any transports are configured.
     pub fn is_empty(&self) -> bool {
         self.udp.is_empty()
+            && self.udp_holepunch.is_empty()
             && self.ethernet.is_empty()
             && self.tcp.is_empty()
             && self.tor.is_empty()
@@ -673,6 +763,9 @@ impl TransportsConfig {
     pub fn merge(&mut self, other: TransportsConfig) {
         if !other.udp.is_empty() {
             self.udp = other.udp;
+        }
+        if !other.udp_holepunch.is_empty() {
+            self.udp_holepunch = other.udp_holepunch;
         }
         if !other.ethernet.is_empty() {
             self.ethernet = other.ethernet;

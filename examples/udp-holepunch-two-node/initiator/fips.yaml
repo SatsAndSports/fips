@@ -1,0 +1,26 @@
+node:
+  identity:
+    nsec: "nsec1REPLACE_ME_INITIATOR"
+  log_level: debug
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp_holepunch:
+    main:
+      bind_ip: "0.0.0.0"
+      relays:
+        - "ws://80.78.18.182:7777"
+      stun_servers:
+        - "stun.l.google.com:19302"
+        - "stun.cloudflare.com:3478"
+      probe_ms: 200
+      timeout_secs: 10
+      auto_connect: true
+      accept_connections: false
+
+peers: []

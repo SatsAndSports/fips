@@ -694,6 +694,34 @@ impl Node {
             transports.push(TransportHandle::Udp(udp));
         }
 
+        // Create UDP hole-punch transport instances
+        let udp_holepunch_instances: Vec<_> = self
+            .config
+            .transports
+            .udp_holepunch
+            .iter()
+            .map(|(name, config)| (name.map(|s| s.to_string()), config.clone()))
+            .collect();
+
+        let nostr_keys = {
+            let secret_bytes = self.identity.keypair().secret_bytes();
+            let nostr_secret = nostr::SecretKey::from_slice(&secret_bytes)
+                .expect("FIPS identity is a valid secp256k1 key");
+            nostr::Keys::new(nostr_secret)
+        };
+
+        for (name, udp_holepunch_config) in udp_holepunch_instances {
+            let transport_id = self.allocate_transport_id();
+            let mut transport = crate::transport::udp_holepunch::UdpHolePunchTransport::new(
+                transport_id,
+                name,
+                udp_holepunch_config,
+                packet_tx.clone(),
+            );
+            transport.set_keys(nostr_keys.clone());
+            transports.push(TransportHandle::UdpHolePunch(transport));
+        }
+
         // Create Ethernet transport instances
         #[cfg(target_os = "linux")]
         {

@@ -1,0 +1,27 @@
+node:
+  identity:
+    nsec: "5860916e7906d53e16310df39eeb6658c3338f645c892511892549c961b79608"
+  log_level: debug
+
+tun:
+  enabled: false
+
+dns:
+  enabled: false
+
+transports:
+  udp_holepunch:
+    main:
+      bind_ip: "0.0.0.0"
+      relays:
+        - "ws://relay:80"
+      stun_servers:
+        - "stun.l.google.com:19302"
+        - "stun.cloudflare.com:3478"
+      probe_ms: 200
+      timeout_secs: 10
+      auto_connect: false
+      accept_connections: true
+      ad_expiration_secs: 3600
+
+peers: []

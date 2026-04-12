@@ -1,0 +1,64 @@
+networks:
+  lan-demo-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+  relay:
+    build:
+      context: ../sidecar-nostr-relay
+      dockerfile: Dockerfile.app
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "/bin/sh", "-c", "pidof nginx >/dev/null && pidof strfry >/dev/null"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+    volumes:
+      - ./relay/strfry.conf:/usr/src/app/strfry.conf:ro
+      - relay-data:/usr/src/app/strfry-db
+    networks:
+      lan-demo-net:
+        ipv4_address: 172.28.0.10
+
+  responder:
+    build:
+      context: ../..
+      dockerfile: examples/udp-holepunch-two-node/Dockerfile
+    restart: "no"
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=${RUST_LOG:-debug}
+    volumes:
+      - ./responder/fips.yaml:/config/fips.yaml:ro
+    command: ["fips", "--config", "/config/fips.yaml"]
+    networks:
+      lan-demo-net:
+        ipv4_address: 172.28.0.21
+
+  initiator:
+    build:
+      context: ../..
+      dockerfile: examples/udp-holepunch-two-node/Dockerfile
+    restart: "no"
+    depends_on:
+      relay:
+        condition: service_healthy
+      responder:
+        condition: service_started
+    environment:
+      - RUST_LOG=${RUST_LOG:-debug}
+    volumes:
+      - ./initiator/fips.yaml:/config/fips.yaml:ro
+    command: ["fips", "--config", "/config/fips.yaml"]
+    networks:
+      lan-demo-net:
+        ipv4_address: 172.28.0.22
+
+volumes:
+  relay-data:
