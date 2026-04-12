@@ -4,10 +4,10 @@ node:
   log_level: debug
 
 tun:
-  enabled: false
+  enabled: true
 
 dns:
-  enabled: false
+  enabled: true
 
 transports:
   udp_holepunch:
