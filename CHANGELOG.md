@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unavailable on OpenWrt targets
 - IPv6 routing policy rule added at TUN setup to protect `fd00::/8`
   from interception by Tailscale's table 52 default route
+- Bloom filter routing no longer swallows traffic when no bloom
+  candidate is strictly closer than the current node. `find_next_hop`
+  now falls through to greedy tree routing in that case instead of
+  returning `NoRoute`, which previously caused dropped packets in
+  topologies where the tree parent was closer but not a bloom
+  candidate
+- Auto-connect peers now reconnect after a graceful `Disconnect`
+  notification from the remote side. `handle_disconnect` previously
+  removed the peer without scheduling a reconnect, orphaning the
+  entry on a clean upstream shutdown; the other removal paths
+  (link-dead, decrypt failure, peer restart) already scheduled
+  reconnect ([#60](https://github.com/jmcorgan/fips/issues/60),
+  reported by [@SwapMarket](https://github.com/SwapMarket))
+- `fipsctl connect` now rejects FIPS mesh (`fd00::/8`) addresses for
+  `udp`, `tcp`, and `ethernet` transports with a clear error message
+  instead of echoing success while the daemon silently failed the
+  bind with `EAFNOSUPPORT`
+  ([#61](https://github.com/jmcorgan/fips/issues/61),
+  reported by [@SwapMarket](https://github.com/SwapMarket))
 
 ## [0.2.0] - 2026-03-22
 
