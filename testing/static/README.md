@@ -143,18 +143,33 @@ To persist coord-monitor events continuously across container restarts or
 recreates, run the live collector before starting or cycling the topology:
 
 ```bash
-./testing/static/scripts/collect-coord-monitor-live.sh lookup-monitor-demo \
+./testing/static/scripts/collect-coord-monitor-live.sh my-session \
   fips-node-a fips-node-b fips-node-c
 ```
 
-This writes append-only raw logs and per-container event JSONL under:
+This writes append-only raw logs and per-container event JSONL under a stable,
+session-named directory:
 
 ```text
-artifacts/coord-monitor/live/<timestamp>_lookup-monitor-demo_live/
+artifacts/coord-monitor/live/my-session/
 ```
 
+You can stop and restart the collector later with the same session name and it
+will continue appending to the same files, recording each collector run as a
+new invocation in `state.json`.
+
 Stop the collector with `Ctrl-C`, then derive DOT graphs from the captured raw
-logs with the command printed by the wrapper script.
+logs with:
+
+```bash
+make my-session.svg
+```
+
+The rendered SVG is written to:
+
+```text
+artifacts/coord-monitor/live/my-session/post/graph/combined.svg
+```
 
 ### Rekey
 

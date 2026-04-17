@@ -39,9 +39,9 @@ def docker_inspect(container: str) -> tuple[bool, str | None]:
 
 
 class LiveCollector:
-    def __init__(self, run_dir: Path, run_id: str, containers: list[str]):
+    def __init__(self, run_dir: Path, session_name: str, containers: list[str]):
         self.run_dir = run_dir
-        self.run_id = run_id
+        self.session_name = session_name
         self.containers = containers
         self.raw_dir = run_dir / "raw"
         self.events_dir = run_dir / "events"
@@ -52,25 +52,62 @@ class LiveCollector:
         self.lock = threading.Lock()
         self.threads: list[threading.Thread] = []
         self.started_at_ms = now_ms()
-        self.state = {
-            "run_id": run_id,
-            "started_at_ms": self.started_at_ms,
-            "updated_at_ms": self.started_at_ms,
-            "containers": {
-                name: {
-                    "status": "waiting",
-                    "container_id": None,
-                    "attach_count": 0,
-                    "events_written": 0,
-                    "rejects_written": 0,
-                    "last_attach_ms": None,
-                    "last_event_ms": None,
-                    "last_seen_log_ms": None,
-                }
-                for name in containers
-            },
-        }
+        self.invocation_id = str(self.started_at_ms)
+        self.state = self.load_or_init_state()
         self.rejects_path = self.events_dir / "rejects.jsonl"
+
+    def default_container_state(self) -> dict:
+        return {
+            "status": "waiting",
+            "container_id": None,
+            "attach_count": 0,
+            "events_written": 0,
+            "rejects_written": 0,
+            "last_attach_ms": None,
+            "last_event_ms": None,
+            "last_seen_log_ms": None,
+        }
+
+    def load_or_init_state(self) -> dict:
+        state_path = self.run_dir / "state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+        else:
+            state = {
+                "session_name": self.session_name,
+                "created_at_ms": self.started_at_ms,
+                "updated_at_ms": self.started_at_ms,
+                "invocations": [],
+                "containers": {},
+            }
+
+        state["session_name"] = self.session_name
+        state.setdefault("created_at_ms", self.started_at_ms)
+        state.setdefault("updated_at_ms", self.started_at_ms)
+        state.setdefault("invocations", [])
+        containers_state = state.setdefault("containers", {})
+        for name in self.containers:
+            containers_state.setdefault(name, self.default_container_state())
+
+        state["invocations"].append(
+            {
+                "invocation_id": self.invocation_id,
+                "started_at_ms": self.started_at_ms,
+                "stopped_at_ms": None,
+                "containers": self.containers,
+            }
+        )
+        state["updated_at_ms"] = self.started_at_ms
+        return state
+
+    def finalize_invocation(self) -> None:
+        with self.lock:
+            for invocation in self.state.get("invocations", []):
+                if invocation.get("invocation_id") == self.invocation_id:
+                    invocation["stopped_at_ms"] = now_ms()
+                    break
+            self.state["updated_at_ms"] = now_ms()
+            write_json(self.run_dir / "state.json", self.state)
 
     def update_state(self, container: str, **fields) -> None:
         with self.lock:
@@ -138,7 +175,8 @@ class LiveCollector:
 
                     if error is not None:
                         reject = {
-                            "run_id": self.run_id,
+                            "session_name": self.session_name,
+                            "invocation_id": self.invocation_id,
                             "container": container,
                             "container_id": container_id,
                             "collector_received_at_ms": now_ms(),
@@ -154,11 +192,13 @@ class LiveCollector:
                         continue
 
                     assert event is not None
-                    event["run_id"] = self.run_id
+                    event["session_name"] = self.session_name
+                    event["invocation_id"] = self.invocation_id
                     event["container"] = container
                     event["container_id"] = container_id
                     event["collector_received_at_ms"] = now_ms()
                     self.append_jsonl(event_path, event)
+                    print(f"[event] {container} {event.get('event', 'unknown')}", flush=True)
                     entry = self.state["containers"][container]
                     self.update_state(
                         container,
@@ -194,12 +234,13 @@ class LiveCollector:
 
         for thread in self.threads:
             thread.join(timeout=10)
+        self.finalize_invocation()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True, help="Output run directory")
-    parser.add_argument("--run-id", required=True, help="Run identifier")
+    parser.add_argument("--session-name", required=True, help="Stable session name")
     parser.add_argument(
         "--containers",
         nargs="+",
@@ -215,7 +256,7 @@ def main() -> int:
     run_dir = Path(args.run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    collector = LiveCollector(run_dir, args.run_id, args.containers)
+    collector = LiveCollector(run_dir, args.session_name, args.containers)
 
     def stop_handler(_signum, _frame):
         collector.stop_event.set()
@@ -224,6 +265,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop_handler)
 
     print(f"live coord-monitor collector writing to {run_dir}")
+    print(f"session name: {args.session_name}")
     print(f"watching containers: {', '.join(args.containers)}")
     collector.run()
     print("collector stopped")
