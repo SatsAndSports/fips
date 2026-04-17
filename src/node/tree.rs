@@ -172,7 +172,10 @@ impl Node {
             return;
         }
 
+        self.coord_monitor_tree_announce_received(from, &announce);
+
         if let Err(e) = announce.validate_semantics() {
+            self.coord_monitor_tree_announce_rejected(from, &announce, &e.to_string());
             warn!(
                 from = %self.peer_display_name(from),
                 error = %e,
@@ -207,6 +210,7 @@ impl Node {
         }
 
         self.stats_mut().tree.accepted += 1;
+        self.coord_monitor_tree_announce_accepted(from, &announce);
 
         debug!(
             from = %self.peer_display_name(from),
@@ -256,6 +260,7 @@ impl Node {
                 depth = self.tree_state.my_coords().depth(),
                 "Parent switched, flushed coord cache, announcing to all peers"
             );
+            self.coord_monitor_local_tree_snapshot("parent_switch");
             if flap_dampened {
                 self.stats_mut().tree.flap_dampened += 1;
                 warn!("Flap dampening engaged: excessive parent switches detected");
@@ -291,6 +296,7 @@ impl Node {
                     }
                     self.coord_cache.clear();
                     self.reset_discovery_backoff();
+                    self.coord_monitor_local_tree_snapshot("loop_detected_parent_drop");
                     self.send_tree_announce_to_all().await;
                 }
                 return;
@@ -329,6 +335,7 @@ impl Node {
                     new_depth = new_depth,
                     "Parent ancestry changed, re-announcing"
                 );
+                self.coord_monitor_local_tree_snapshot("parent_ancestry_changed");
                 self.send_tree_announce_to_all().await;
 
                 // Coords changed — trigger bloom filter exchange with all peers
@@ -408,6 +415,7 @@ impl Node {
                 trigger = "periodic",
                 "Parent switched via periodic cost re-evaluation"
             );
+            self.coord_monitor_local_tree_snapshot("periodic_parent_switch");
             if flap_dampened {
                 self.stats_mut().tree.flap_dampened += 1;
                 warn!("Flap dampening engaged: excessive parent switches detected");
@@ -451,6 +459,7 @@ impl Node {
                     is_root = self.tree_state.is_root(),
                     "Tree state updated after parent loss"
                 );
+                self.coord_monitor_local_tree_snapshot("parent_loss");
             }
             changed
         } else {

@@ -13,6 +13,7 @@ pub async fn dispatch(node: &mut Node, command: &str, params: Option<&Value>) ->
     match command {
         "connect" => connect(node, params).await,
         "disconnect" => disconnect(node, params),
+        "lookup" => lookup(node, params).await,
         _ => Response::error(format!("unknown command: {command}")),
     }
 }
@@ -62,6 +63,27 @@ fn disconnect(node: &mut Node, params: Option<&Value>) -> Response {
     debug!(npub = %npub, "API disconnect requested");
 
     match node.api_disconnect(npub) {
+        Ok(data) => Response::ok(data),
+        Err(msg) => Response::error(msg),
+    }
+}
+
+/// Initiate a discovery lookup.
+///
+/// Params: `{"npub": "npub1..."}`
+async fn lookup(node: &mut Node, params: Option<&Value>) -> Response {
+    let Some(params) = params else {
+        return Response::error("missing params for lookup");
+    };
+
+    let npub = match params.get("npub").and_then(|v| v.as_str()) {
+        Some(v) => v,
+        None => return Response::error("missing 'npub' parameter"),
+    };
+
+    debug!(npub = %npub, "API lookup requested");
+
+    match node.api_lookup(npub).await {
         Ok(data) => Response::ok(data),
         Err(msg) => Response::error(msg),
     }

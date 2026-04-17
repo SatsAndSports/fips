@@ -98,6 +98,26 @@ The topology file sets `default_transport: tcp`, which causes config
 generation to use TCP peer addresses (port 8443), inject the TCP transport
 section, and remove the UDP transport section.
 
+### Lookup Monitor Demo
+
+Three nodes in a linear UDP chain: A -- B -- C. The profile enables
+`RUST_LOG=info,full_coord_monitoring=debug` so the coord-monitor stream is
+captured from the start. Trigger a lookup from A to C with:
+
+```bash
+docker exec fips-node-a fipsctl lookup "$NPUB_C"
+```
+
+Or use the helper script:
+
+```bash
+./testing/static/scripts/lookup-monitor-demo.sh
+```
+
+Node B should log both the incoming `LookupRequest` and the returning
+`LookupResponse`, making it a good first observability demo for multi-hop
+discovery.
+
 ### Rekey
 
 Same sparse mesh as the mesh topology (5 nodes, 6 links). Configs are
@@ -119,6 +139,7 @@ testing/static/
 │   └── topologies/
 │       ├── mesh.yaml                   # Mesh topology definition
 │       ├── chain.yaml                  # Chain topology definition
+│       ├── lookup-monitor-demo.yaml    # Three-node chain with coord-monitoring
 │       ├── mesh-public.yaml            # Mesh + external public node
 │       ├── tcp-chain.yaml             # TCP chain (3 nodes, port 8443)
 │       └── rekey.yaml                 # Rekey integration test (5 nodes)
@@ -138,6 +159,7 @@ testing/static/
 │   ├── derive-keys.py                  # Deterministic nsec/npub derivation
 │   ├── ping-test.sh                    # Connectivity test
 │   ├── iperf-test.sh                   # Bandwidth test
+│   ├── lookup-monitor-demo.sh          # A->C discovery log demo
 │   └── netem.sh                        # Network impairment
 ├── docker-mesh-topology.svg            # Mesh topology diagram
 └── docker-chain-topology.svg           # Chain topology diagram

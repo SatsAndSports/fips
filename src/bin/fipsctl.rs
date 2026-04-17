@@ -66,6 +66,11 @@ enum Commands {
         /// Peer identifier: npub (bech32) or hostname from /etc/fips/hosts
         peer: String,
     },
+    /// Initiate a discovery lookup for a target node
+    Lookup {
+        /// Target identifier: npub (bech32) or hostname from /etc/fips/hosts
+        peer: String,
+    },
     /// Query historical node statistics
     Stats {
         #[command(subcommand)]
@@ -425,6 +430,10 @@ fn main() {
         Commands::Disconnect { peer } => {
             let npub = resolve_peer(peer);
             build_command("disconnect", serde_json::json!({"npub": npub}))
+        }
+        Commands::Lookup { peer } => {
+            let npub = resolve_peer(peer);
+            build_command("lookup", serde_json::json!({"npub": npub}))
         }
         Commands::Stats { what } => match what {
             StatsCommands::List => build_query("show_stats_list"),

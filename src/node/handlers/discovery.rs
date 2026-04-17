@@ -32,6 +32,8 @@ impl Node {
             }
         };
 
+        self.coord_monitor_lookup_request_received(from, &request);
+
         let now_ms = Self::now_ms();
 
         // Dedup: drop if we've already seen this request_id.
@@ -83,7 +85,7 @@ impl Node {
                 return;
             }
             self.stats_mut().discovery.req_forwarded += 1;
-            self.forward_lookup_request(request).await;
+            self.forward_lookup_request(from, request).await;
         } else {
             self.stats_mut().discovery.req_ttl_exhausted += 1;
             debug!(
@@ -116,6 +118,8 @@ impl Node {
                 return;
             }
         };
+
+        self.coord_monitor_lookup_response_received(from, &response);
 
         let now_ms = Self::now_ms();
 
@@ -164,6 +168,8 @@ impl Node {
                     error = %e,
                     "Failed to forward LookupResponse"
                 );
+            } else {
+                self.coord_monitor_lookup_response_forwarded(from, &from_peer, &response);
             }
         } else {
             // We originated this request — verify proof before caching
@@ -292,6 +298,8 @@ impl Node {
                 error = %e,
                 "Failed to send LookupResponse"
             );
+        } else {
+            self.coord_monitor_lookup_response_sent(&next_hop_addr, &response);
         }
     }
 
@@ -304,7 +312,7 @@ impl Node {
     /// Fallback: if no tree peer's bloom matches, try non-tree peers whose
     /// bloom contains the target. This recovers from dead ends caused by
     /// stale bloom filters, tree restructuring, or transit node failures.
-    async fn forward_lookup_request(&mut self, mut request: LookupRequest) {
+    async fn forward_lookup_request(&mut self, from: &NodeAddr, mut request: LookupRequest) {
         if !request.forward() {
             return;
         }
@@ -366,6 +374,13 @@ impl Node {
                     error = %e,
                     "Failed to forward LookupRequest to peer"
                 );
+            } else {
+                self.coord_monitor_lookup_request_forwarded(
+                    from,
+                    &peer_addr,
+                    &request,
+                    used_fallback,
+                );
             }
         }
     }
@@ -415,6 +430,8 @@ impl Node {
                     error = %e,
                     "Failed to send LookupRequest to peer"
                 );
+            } else {
+                self.coord_monitor_lookup_request_sent(&peer_addr, &request);
             }
         }
 

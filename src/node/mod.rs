@@ -5,6 +5,7 @@
 //! Bloom filters, coordinate caches, transports, links, and peers.
 
 mod bloom;
+mod coord_monitor;
 mod discovery_rate_limit;
 mod handlers;
 mod lifecycle;

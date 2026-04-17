@@ -916,4 +916,28 @@ impl Node {
             "disconnected": true,
         }))
     }
+
+    /// Initiate a discovery lookup via the control API.
+    pub(crate) async fn api_lookup(&mut self, npub: &str) -> Result<serde_json::Value, String> {
+        let peer_identity =
+            PeerIdentity::from_npub(npub).map_err(|e| format!("invalid npub '{npub}': {e}"))?;
+        let node_addr = *peer_identity.node_addr();
+
+        self.peer_aliases
+            .entry(node_addr)
+            .or_insert_with(|| peer_identity.short_npub());
+        self.register_identity(node_addr, peer_identity.pubkey_full());
+
+        let pending_before = self.pending_lookup_count();
+        self.maybe_initiate_lookup(&node_addr).await;
+        let lookup_started = self.pending_lookup_count() > pending_before;
+
+        info!(npub = %npub, node_addr = %node_addr, started = lookup_started, "API lookup requested");
+
+        Ok(serde_json::json!({
+            "npub": npub,
+            "node_addr": hex::encode(node_addr.as_bytes()),
+            "lookup_started": lookup_started,
+        }))
+    }
 }
