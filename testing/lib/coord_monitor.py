@@ -35,6 +35,26 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def parse_coord_monitor_line(raw_line: str) -> tuple[dict | None, str | None, str | None]:
+    """Return (event, cleaned_line, error) for a single coord-monitor log line.
+
+    - `event` is the parsed JSON payload when present and valid
+    - `cleaned_line` is the ANSI-stripped line when it matches the coord-monitor target
+    - `error` is a parse error string when JSON extraction failed
+    """
+    line = strip_ansi(raw_line)
+    if "full_coord_monitoring" not in line or "payload=" not in line:
+        return None, None, None
+
+    payload = line.split("payload=", 1)[1].strip()
+    try:
+        event = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return None, line, str(exc)
+
+    return event, line, None
+
+
 def short_addr(node_addr: str) -> str:
     return node_addr if len(node_addr) <= 12 else f"{node_addr[:8]}..."
 
@@ -85,20 +105,16 @@ def extract_events(log_text: str, source: str, run_id: str) -> tuple[list[dict],
     rejects: list[dict] = []
 
     for lineno, raw_line in enumerate(log_text.splitlines(), start=1):
-        line = strip_ansi(raw_line)
-        if "full_coord_monitoring" not in line or "payload=" not in line:
+        event, line, error = parse_coord_monitor_line(raw_line)
+        if line is None and event is None and error is None:
             continue
-
-        payload = line.split("payload=", 1)[1].strip()
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError as exc:
+        if error is not None:
             rejects.append(
                 {
                     "source": source,
                     "run_id": run_id,
                     "line_number": lineno,
-                    "error": str(exc),
+                    "error": error,
                     "raw_line": line,
                 }
             )

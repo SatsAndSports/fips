@@ -139,6 +139,23 @@ including:
 - derived child->parent coord edges and lookup message-flow edges
 - Graphviz DOT files (`coord-only.dot`, `message-only.dot`, `combined.dot`)
 
+To persist coord-monitor events continuously across container restarts or
+recreates, run the live collector before starting or cycling the topology:
+
+```bash
+./testing/static/scripts/collect-coord-monitor-live.sh lookup-monitor-demo \
+  fips-node-a fips-node-b fips-node-c
+```
+
+This writes append-only raw logs and per-container event JSONL under:
+
+```text
+artifacts/coord-monitor/live/<timestamp>_lookup-monitor-demo_live/
+```
+
+Stop the collector with `Ctrl-C`, then derive DOT graphs from the captured raw
+logs with the command printed by the wrapper script.
+
 ### Rekey
 
 Same sparse mesh as the mesh topology (5 nodes, 6 links). Configs are
@@ -180,6 +197,7 @@ testing/static/
 │   ├── derive-keys.py                  # Deterministic nsec/npub derivation
 │   ├── ping-test.sh                    # Connectivity test
 │   ├── iperf-test.sh                   # Bandwidth test
+│   ├── collect-coord-monitor-live.sh   # Live coord-monitor collector wrapper
 │   ├── export-coord-monitor.sh         # Persist coord-monitor logs + DOT graphs
 │   ├── lookup-monitor-demo.sh          # A->C discovery log demo
 │   └── netem.sh                        # Network impairment
