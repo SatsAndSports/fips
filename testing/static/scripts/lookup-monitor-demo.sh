@@ -48,3 +48,7 @@ docker logs --since "$since" fips-node-b 2>&1 | grep full_coord_monitoring || tr
 echo
 echo "Node C coord-monitor events:"
 docker logs --since "$since" fips-node-c 2>&1 | grep full_coord_monitoring || true
+
+echo
+echo "Persist these logs and build Graphviz artifacts with:"
+echo "  ./testing/static/scripts/export-coord-monitor.sh lookup-monitor-demo fips-node-a fips-node-b fips-node-c"

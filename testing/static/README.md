@@ -118,6 +118,27 @@ Node B should log both the incoming `LookupRequest` and the returning
 `LookupResponse`, making it a good first observability demo for multi-hop
 discovery.
 
+Persist the coord-monitor stream and derive Graphviz DOT files with:
+
+```bash
+./testing/static/scripts/export-coord-monitor.sh lookup-monitor-demo \
+  fips-node-a fips-node-b fips-node-c
+```
+
+Artifacts are written under:
+
+```text
+artifacts/coord-monitor/<timestamp>_lookup-monitor-demo/
+```
+
+including:
+
+- raw Docker logs
+- extracted `coord_monitor_v2` JSONL events
+- merged `node_addr -> npub/display_name` identity map
+- derived child->parent coord edges and lookup message-flow edges
+- Graphviz DOT files (`coord-only.dot`, `message-only.dot`, `combined.dot`)
+
 ### Rekey
 
 Same sparse mesh as the mesh topology (5 nodes, 6 links). Configs are
@@ -159,6 +180,7 @@ testing/static/
 │   ├── derive-keys.py                  # Deterministic nsec/npub derivation
 │   ├── ping-test.sh                    # Connectivity test
 │   ├── iperf-test.sh                   # Bandwidth test
+│   ├── export-coord-monitor.sh         # Persist coord-monitor logs + DOT graphs
 │   ├── lookup-monitor-demo.sh          # A->C discovery log demo
 │   └── netem.sh                        # Network impairment
 ├── docker-mesh-topology.svg            # Mesh topology diagram
