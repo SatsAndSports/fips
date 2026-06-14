@@ -1,6 +1,20 @@
 node:
   identity:
     persistent: true
+  discovery:
+    nostr:
+      enabled: true
+      advertise: true
+      advert_relays:
+        - "wss://relay.damus.io"
+        - "wss://nos.lol"
+        - "wss://offchain.pub"
+        - "wss://temp.iris.to"
+      dm_relays:
+        - "wss://relay.damus.io"
+        - "wss://nos.lol"
+        - "wss://offchain.pub"
+        - "wss://temp.iris.to"
 
 tun:
   enabled: true
@@ -14,6 +28,14 @@ transports:
   udp:
     bind_addr: "0.0.0.0:2121"
     mtu: 1472
+    advertise_on_nostr: true
+    public: true
+    # external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
+
+  tcp:
+    bind_addr: "0.0.0.0:2121"
+    advertise_on_nostr: true
+    # external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
 
 peers:
   - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
@@ -21,4 +43,29 @@ peers:
     addresses:
       - transport: udp
         addr: "test-us01.fips.network:2121"
+    connect_policy: auto_connect
+
+  - npub: "npub14lu6r3yu4ef8rzdcs0kaz7axtf5dtkqrup5eet9yhndlayd8cqgsw48ydd"
+    alias: "nat-peer-1"
+    via_nostr: true
+    connect_policy: auto_connect
+
+  - npub: "npub1sg2z8zwnfn4jttstzrf6gvxesk0grcarhz4ad7ff300698z6prxqhsmerd"
+    alias: "nat-peer-2"
+    via_nostr: true
+    connect_policy: auto_connect
+
+  - npub: "npub154t4v6gqj8ag56pwaardqrapthlpudmfsq56edu4g48l8wdfgjyqd4c6qm"
+    alias: "nat-peer-3"
+    via_nostr: true
+    connect_policy: auto_connect
+
+  - npub: "npub1vjs33x5s7cq27kev9qcagu4lmcryhyts9pwug67ynaykfap6af7q263kyj"
+    alias: "nat-peer-4"
+    via_nostr: true
+    connect_policy: auto_connect
+
+  - npub: "npub1mhku98a35ehlkc3z90agd5qaxu2cm850n4ajf758khw07awhd3rqtky3wx"
+    alias: "nat-peer-5"
+    via_nostr: true
     connect_policy: auto_connect
