@@ -30,12 +30,12 @@ transports:
     mtu: 1472
     advertise_on_nostr: true
     public: true
-    # external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
+    external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
 
   tcp:
     bind_addr: "0.0.0.0:2121"
     advertise_on_nostr: true
-    # external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
+    external_addr: "80.78.18.182:2121"   # uncomment and set your fixed public IP to skip STUN
 
 peers:
   - npub: "npub1qmc3cvfz0yu2hx96nq3gp55zdan2qclealn7xshgr448d3nh6lks7zel98"
