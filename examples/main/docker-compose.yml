@@ -28,4 +28,4 @@ services:
       - FIPS_TEST_MODE=default
     volumes:
       - ./config:/etc/fips
-    restart: "no"
+    restart: unless-stopped
