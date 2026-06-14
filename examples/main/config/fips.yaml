@@ -45,6 +45,38 @@ peers:
         addr: "test-us01.fips.network:2121"
     connect_policy: auto_connect
 
+  - npub: "npub1u0z26dc4qeneu5rvwvmpfhtwh3522ed6rlgxr9jarrfnjrc6ew4qxjysrs"
+    alias: "test-uk01"
+    addresses:
+      - transport: udp
+        addr: "88.208.241.33:2121"
+    connect_policy: auto_connect
+
+  - npub: "npub10yffd020a4ag8zcy75f9pruq3rnghvvhd5hphl9s62zgp35s560qrksp9u"
+    alias: "test-us02"
+    addresses:
+      - transport: udp
+        addr: "23.182.128.74:2121"
+      - transport: tcp
+        addr: "23.182.128.74:443"
+    connect_policy: auto_connect
+
+  - npub: "npub136yqae6na688fs75g95ppps3lxe07fvxefj77938zf47uhm6074sxw8ctm"
+    alias: "test-us03"
+    addresses:
+      - transport: udp
+        addr: "54.183.70.180:2121"
+      - transport: tcp
+        addr: "54.183.70.180:443"
+    connect_policy: auto_connect
+
+  - npub: "npub1gd7ye2qp2lphhzx75fynnjzaxx4dqanddecet0wtt5ss5ek8h9ps62wdkf"
+    alias: "test-us04"
+    addresses:
+      - transport: udp
+        addr: "74.208.245.160:2121"
+    connect_policy: auto_connect
+
   - npub: "npub14lu6r3yu4ef8rzdcs0kaz7axtf5dtkqrup5eet9yhndlayd8cqgsw48ydd"
     alias: "nat-peer-1"
     via_nostr: true
