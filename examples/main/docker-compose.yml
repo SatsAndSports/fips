@@ -1,0 +1,30 @@
+# Minimal FIPS example: one container that joins the public test mesh.
+#
+# Prerequisites:
+#   ./testing/scripts/build.sh   # builds fips-test:latest
+#
+# Usage:
+#   docker compose up -d
+#   docker compose exec fips fipsctl show peers
+#   docker compose exec fips ping6 -c 4 test-us01.fips
+#   docker compose exec -it fips fipstop
+
+services:
+  fips:
+    image: fips-test:latest
+    container_name: fips-main
+    hostname: fips-main
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    ports:
+      - "2121:2121/udp"
+    environment:
+      - RUST_LOG=info
+      - FIPS_TEST_MODE=default
+    volumes:
+      - ./config:/etc/fips
+    restart: "no"
